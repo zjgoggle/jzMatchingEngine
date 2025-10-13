@@ -1,0 +1,6 @@
+benchmark
+build
+build-*
+*.o
+*-bench
+*-unit
