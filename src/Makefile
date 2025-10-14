@@ -1,6 +1,6 @@
 
-all: JzMatchingEngineMain JzMatchingEngineMain-Test
-TARGET=JzMatchingEngineMain
+all: SimpleMatchingEngineMain SimpleMatchingEngineMain-Test
+TARGET=SimpleMatchingEngineMain
 
 CSRC=$(wildcard *.cpp)
 #DEPS=library
@@ -15,11 +15,11 @@ $(TARGET): $(COBJ)
 $(COBJ): %.o: %.cpp
 	$(CXX) $(CFLAGS) -o $@ -c $<
 
-JzMatchingEngineMain-Test: JzMatchingEngine-main.cpp
-	$(CXX) -std=c++20 -o JzMatchingEngineMain-Test -g JzMatchingEngine-main.cpp -DTEST_CONFIG_IMPLEMENT_MAIN
+SimpleMatchingEngineMain-Test: JzMatchingEngine-main.cpp
+	$(CXX) -std=c++20 -o SimpleMatchingEngineMain-Test -g JzMatchingEngine-main.cpp -DTEST_CONFIG_IMPLEMENT_MAIN
 
 clean:
-	rm -f $(COBJ) $(TARGET) JzMatchingEngineMain-Test
+	rm -f $(COBJ) $(TARGET) SimpleMatchingEngineMain-Test
 
 test:
-	./JzMatchingEngineMain-Test
+	./SimpleMatchingEngineMain-Test

@@ -1,6 +1,9 @@
 # Jz Matching Engine
 
-A simplified efficient matching engine that processes client NewOrder & CancelOrder and generates Trade events and OrderFill responses.
+[![Build](https://github.com/zjgoggle/jzMatchingEngine/actions/workflows/cmake-multi-platform.yml/badge.svg)](https://github.com/zjgoggle/jzMatchingEngine/actions/workflows/cmake-multi-platform.yml)
+[![License](https://img.shields.io/badge/license-MIT-blue)](https://github.com/zjgoggle/jzMatchingEngine/blob/main/LICENSE-MIT)
+
+A simplified efficient matching engine that processes client NewOrder & CancelOrder and generates trade events.
 
 ## Requirements
 
@@ -41,5 +44,13 @@ output for each match.
   - min/max Price Heap of price levels(Price, PointerToOrderList): fast check/remove top price and insert a price.
   - OrderID HashMap<OrderID, OrderKey>: fast find an order in a book. OrderKey contains a pointer to OrderList and a poniter to by-price HashMap.
 
+* Time complexities:
+  - Find top price to match: O(1) to find the opt of Price Heap.
+  - Removing top price takes O(log(N)).
+  - Add a new order to order book.
+    - If price is already in orderbook, it takes O(1)  time to look up By-price HashMapp and append the order to OrderList.
+    - Else, it looks O(log(N)) time to push into Price Heap.
+  - Cancel an order: O(1) to look up OrderID HashMap and remove it from OrderList.
+    - when there's no order for a price, remove it if it's top price; else, keep the empty list until it becomes the top price.
 
 ***This program was built by g++ version 13.1.0 on ubuntu 22.04***

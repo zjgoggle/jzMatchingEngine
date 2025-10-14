@@ -284,4 +284,4 @@ int main()
 4,5,100
 3,3)" );
 }
-#endif
+#endif // TEST_CONFIG_IMPLEMENT_MAIN

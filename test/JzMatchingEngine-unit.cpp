@@ -4,7 +4,7 @@
 #include "UnitTest.h"
 #include "../src/OrderBook.h"
 
-TEST_CASE( "OrderBook" )
+TEST_CASE( "OrderBook-Match" )
 {
     OrderBook          orderBook{};
     TradeDetailPrinter tradeReporter;
