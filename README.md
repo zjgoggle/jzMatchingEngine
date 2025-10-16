@@ -1,4 +1,4 @@
-# Jz Matching Engine
+# [Jz Matching Engine](https://github.com/zjgoggle/jzMatchingEngine)
 
 [![Build](https://github.com/zjgoggle/jzMatchingEngine/actions/workflows/cmake-multi-platform.yml/badge.svg)](https://github.com/zjgoggle/jzMatchingEngine/actions/workflows/cmake-multi-platform.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue)](https://github.com/zjgoggle/jzMatchingEngine/blob/main/LICENSE-MIT)
@@ -53,4 +53,4 @@ output for each match.
   - Cancel an order: O(1) to look up OrderID HashMap and remove it from OrderList.
     - when there's no order for a price, remove it if it's top price; else, keep the empty list until it becomes the top price.
 
-***This program was built by g++ version 13.1.0 on ubuntu 22.04***
+***This program was developed by g++ version 14.2.1 on Oracle Linux Server release 9.5 and should support all major x86_64&arm64 Linux&Windows platforms***

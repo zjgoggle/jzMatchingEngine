@@ -7,6 +7,7 @@ CSRC=$(wildcard *.cpp)
 
 COBJ= $(patsubst %.cpp,%.o,$(CSRC))
 CFLAGS=-std=c++20 -g
+CFLAGS+=-I../../src
 LDFLAGS=$(addprefix -l,$(DEPS))
 
 $(TARGET): $(COBJ)

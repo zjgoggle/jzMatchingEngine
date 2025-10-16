@@ -10,7 +10,7 @@
                 "-std=c++20",
                 "-g",
                 "${file}",
-                "-I${workspaceFolder}/include",
+                "-I${workspaceFolder}/src",
                 "-o",
                 "${workspaceFolder}/build-Debug/bin/${fileBasenameNoExtension}-test"
             ],
@@ -33,7 +33,7 @@
                 "/nologo",
                 "/Fe${workspaceFolder}\\build-Debug\\bin\\${fileBasenameNoExtension}-test.exe",
                 "/DTEST_CONFIG_IMPLEMENT_MAIN",
-                "/I${workspaceFolder}/include",
+                "/I${workspaceFolder}/src",
                 "/std:c++20",
                 "${file}"
             ],

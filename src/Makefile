@@ -15,8 +15,8 @@ $(TARGET): $(COBJ)
 $(COBJ): %.o: %.cpp
 	$(CXX) $(CFLAGS) -o $@ -c $<
 
-SimpleMatchingEngineMain-Test: JzMatchingEngine-main.cpp
-	$(CXX) -std=c++20 -o SimpleMatchingEngineMain-Test -g JzMatchingEngine-main.cpp -DTEST_CONFIG_IMPLEMENT_MAIN
+SimpleMatchingEngineMain-Test: SimpleMatchingEngine-main.cpp
+	$(CXX) -std=c++20 -o SimpleMatchingEngineMain-Test -g SimpleMatchingEngine-main.cpp -DTEST_CONFIG_IMPLEMENT_MAIN
 
 clean:
 	rm -f $(COBJ) $(TARGET) SimpleMatchingEngineMain-Test

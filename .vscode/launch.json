@@ -58,7 +58,7 @@
                 "-d"
             ],
             "stopAtEntry": false,
-            "cwd": "${command:cmake.launchTargetDirectory}",
+            "cwd": "${workspaceFolder}", // "${command:cmake.launchTargetDirectory}",
             "environment": [],
             "externalConsole": false,
             "MIMode": "gdb",

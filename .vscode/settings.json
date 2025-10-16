@@ -115,6 +115,7 @@
         "stacktrace": "cpp",
         "stdfloat": "cpp",
         "__nullptr": "cpp",
-        "__config": "cpp"
+        "__config": "cpp",
+        "text_encoding": "cpp"
     },
 }
