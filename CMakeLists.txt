@@ -11,3 +11,4 @@ enable_testing()
 
 add_subdirectory(src)
 add_subdirectory(test/unit)
+add_subdirectory(test/func)

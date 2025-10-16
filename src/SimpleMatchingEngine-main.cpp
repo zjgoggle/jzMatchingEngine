@@ -26,6 +26,9 @@ struct SimpleTradeReporter {
     void onError(OrderID orderID, MsgType msgType, ErrCode errCode, const std::string &errMsg) {
         formatError(estream, orderID, msgType, errCode, errMsg);
     }
+    void onLog(OrderID orderID, MsgType msgType, const std::string &msg) {
+        // noop
+    }
 
 private:
     std::ostream &printFill(const TradeMsg::Fill &fill) {

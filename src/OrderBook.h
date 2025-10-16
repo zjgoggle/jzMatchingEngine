@@ -72,6 +72,7 @@ template<class T>
 concept BookEventReporter = requires(T t, TradeMsg tradeMsg, OrderID orderID, MsgType msgType, ErrCode errCode, const std::string &errMsg) {
     { t.onTrade(tradeMsg) } -> std::same_as<void>;
     { t.onError(orderID, msgType, errCode, errMsg) } -> std::same_as<void>;
+    { t.onLog(orderID, msgType, errMsg) } -> std::same_as<void>;
 };
 
 namespace internal {
@@ -326,7 +327,19 @@ public:
     size_t countOrdersAtPrice(Side side, CentPrice price) const { return _books[int(side)].countOrdersAtPrice(price); }
 };
 
-inline void formatError(std::ostream &ostream, OrderID orderID, MsgType msgType, ErrCode errCode, const std::string &errMsg) {
+inline std::string msgTypeToStr(MsgType msgType) {
+    switch (msgType) {
+        case MsgType::AddOrderRequest: return "AddOrderRequest";
+        case MsgType::CancelOrderRequest: return "CancelOrderRequest";
+        case MsgType::PartialCancelRequest: return "PartialCancelRequest";
+        case MsgType::OrderFullyFilled: return "OrderFullyFilled";
+        case MsgType::OrderPartiallyFilled: return "OrderPartiallyFilled";
+        case MsgType::TradeEvent: return "TradeEvent";
+        default: return "UnkownMsgType";
+    }
+}
+
+inline std::ostream &formatError(std::ostream &ostream, OrderID orderID, MsgType msgType, ErrCode errCode, const std::string &errMsg) {
     std::string errStr;
     switch (errCode) {
         case ErrCode::DuplicateOrderID: errStr = "DuplicateOrderID"; break;
@@ -334,7 +347,7 @@ inline void formatError(std::ostream &ostream, OrderID orderID, MsgType msgType,
         case ErrCode::QtyTooLarge: errStr = "QtyTooLarge"; break;
         case ErrCode::QtyTooSmall: errStr = "QtyTooSmall"; break;
     }
-    ostream << "Error: " << errStr << ", orderID: " << orderID << ". " << errMsg << std::endl;
+    return ostream << "[Error] " << errStr << ", orderID: " << orderID << ", msgType: " << msgTypeToStr(msgType) << ". " << errMsg << std::endl;
 }
 
 struct EventDetailPrinter {
@@ -353,7 +366,14 @@ struct EventDetailPrinter {
         printFill(msg.restingOrderFill) << std::endl;
     }
     void onError(OrderID orderID, MsgType msgType, ErrCode errCode, const std::string &errMsg) {
+        if (errCode == ErrCode::UnknownOrderID) {
+            // ignore due to dirty input
+            return;
+        }
         formatError(estream, orderID, msgType, errCode, errMsg);
+    }
+    void onLog(OrderID orderID, MsgType msgType, const std::string &msg) {
+        ostream << "[Info] orderID: " << orderID << ", msgType: " << msgTypeToStr(msgType) << ". " << msg << std::endl;
     }
     std::ostream &printFill(const TradeMsg::Fill &fill) {
         if (fill.isFull) {
@@ -364,4 +384,13 @@ struct EventDetailPrinter {
         return ostream;
     }
 };
+
+struct NUllBookEventReporter {
+    int64_t requestSeq = -1;
+    void    onTrade(const TradeMsg &msg) {}
+    void    onError(OrderID orderID, MsgType msgType, ErrCode errCode, const std::string &errMsg) {}
+    void    onLog(OrderID orderID, MsgType msgType, const std::string &msg) {}
+};
+
+static_assert(BookEventReporter<NUllBookEventReporter>, "NUllBookEventReporter Impl BookEventReporter");
 static_assert(BookEventReporter<EventDetailPrinter>, "EventDetailPrinter Impl BookEventReporter");
