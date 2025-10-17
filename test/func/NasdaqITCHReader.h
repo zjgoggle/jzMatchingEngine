@@ -4,6 +4,7 @@
 #include <fstream>
 #include <string.h>
 #include <assert.h>
+#include <time.h>
 
 #include <boost/pfr.hpp>
 
@@ -235,10 +236,11 @@ struct CrossTrade {
     SizedInt<2>           TrackingNumber;
     TTimestamp            Timestamp;
 
-    SizedInt<4> Shares;
+    SizedInt<8> Shares;
     SizedStr<8> Stock; // symbol
     ScaledPrice Price; // price.getOriginalFloat() to dollar
     SizedInt<8> MatchNumber;
+    char        CrossType; // O: opening; C: closing; I: IPO or halted.
 };
 
 struct BrokenTrade {

@@ -107,7 +107,7 @@ class SideBook {
     Side                              _side;
     OrderListByPriceMap               _levelsByPriceMap;
     std::vector<internal::PriceLevel> _priceQue; // Buy(0): max heap; Sell(1): min heap.
-    size_t                            _nOrders{0}, _nPriceLevels{0};
+    int                               _nOrders{0}, _nPriceLevels{0};
 
     bool (*compare_price)(const internal::PriceLevel &x, const internal::PriceLevel &y) = nullptr; // used by _priceQue
     bool (*can_match)(internal::PriceLevel thisPrice, CentPrice otherPrice)             = nullptr;
@@ -146,11 +146,11 @@ public:
         {
             _priceQue.push_back(PriceLevel{price, iterMap});
             std::push_heap(_priceQue.begin(), _priceQue.end(), *compare_price);
-            ++_nPriceLevels;
         }
         //- add order to orderlist
         OrderList &orderList = iterMap->second;
         orderList.push_back(OrderInfo{.orderID = orderID, .qty = qty, .price = price});
+        if (orderList.size() == 1) { ++_nPriceLevels; }
         bool ok = _orderKeyByOrderIDMap.try_emplace(orderID, OrderKey{.side = _side, .iterList = --orderList.end(), .iterMap = iterMap}).second;
         assert(ok && "Logic Error: orderID has been checked before calling addNewOrder");
         ++_nOrders;
@@ -213,13 +213,18 @@ public:
         }
     }
 
-    size_t countOrders() const { return _nOrders; }
-    size_t countPriceLevels() const { return _nPriceLevels; }
+    int countOrders() const { return _nOrders; }
+    int countPriceLevels() const { return _nPriceLevels; }
     /// PriceQueueSize >= PriceLevels. There may be empty price levels in queue.
-    size_t getPriceQueueSize() const { return _priceQue.size(); }
-    size_t countOrdersAtPrice(CentPrice price) const {
+    int getPriceQueueSize() const { return _priceQue.size(); }
+    int countOrdersAtPrice(CentPrice price) const {
         if (auto it = _levelsByPriceMap.find(price); it != _levelsByPriceMap.end()) return it->second.size();
         return 0;
+    }
+
+    std::pair<CentPrice, int> getTopPriceAndOrders() const {
+        if (_priceQue.empty()) return {};
+        return {_priceQue.front().price, _priceQue.front().iterMap->second.size()};
     }
 
 private:
@@ -250,10 +255,12 @@ class OrderBook {
     internal::OrderKeyByOrderIDMap    _orderKeyByOrderIDMap; // elements are added/deleted in internal::Book.
     std::array<internal::SideBook, 2> _books;                // buy & sell books
 public:
-    explicit OrderBook(BookEventReporterT &reporter, size_t reserveOrders = 100000, size_t reservePriceLevelsPerSide = 1000)
+    explicit OrderBook(BookEventReporterT &reporter, size_t reserveOrders = 20000, size_t reservePriceLevelsPerSide = 2048)
         : _eventReporter(reporter),
           _books{internal::SideBook{_orderKeyByOrderIDMap, Side::Buy, reserveOrders, reservePriceLevelsPerSide},
-                 internal::SideBook{_orderKeyByOrderIDMap, Side::Sell, reserveOrders, reservePriceLevelsPerSide}} {}
+                 internal::SideBook{_orderKeyByOrderIDMap, Side::Sell, reserveOrders, reservePriceLevelsPerSide}} {
+        _orderKeyByOrderIDMap.reserve(reserveOrders * 2);
+    }
 
     /// try matching the new order. If there's remaining qty, add to order book.
     /// @param tradeReporter  reports trade events and executions if there are matches.
@@ -322,9 +329,11 @@ public:
         return matchAddNewOrder(newOrderID, side, qty, price);
     }
 
-    size_t countOrders(Side side) const { return _books[int(side)].countOrders(); }
-    size_t countPriceLevels(Side side) const { return _books[int(side)].countPriceLevels(); }
-    size_t countOrdersAtPrice(Side side, CentPrice price) const { return _books[int(side)].countOrdersAtPrice(price); }
+    int                       countOrders(Side side) const { return _books[int(side)].countOrders(); }
+    int                       countPriceLevels(Side side) const { return _books[int(side)].countPriceLevels(); }
+    int                       getPriceQueueSize(Side side) const { return _books[int(side)].getPriceQueueSize(); }
+    int                       countOrdersAtPrice(Side side, CentPrice price) const { return _books[int(side)].countOrdersAtPrice(price); }
+    std::pair<CentPrice, int> getTopPriceAndOrders(Side side) const { return _books[int(side)].getTopPriceAndOrders(); }
 };
 
 inline std::string msgTypeToStr(MsgType msgType) {
@@ -360,16 +369,16 @@ struct EventDetailPrinter {
             lastTrades.clear(); // it's a new aggressive order
         }
         lastTrades.push_back(msg);
-        if (requestSeq >= 0) ostream << "requestSeq: " << requestSeq << ", ";
+        if (requestSeq >= 0) ostream << "RequestSeq: " << requestSeq << ", ";
         ostream << "Trade qty: " << msg.tradeQty << ", price: " << double(msg.tradePrice / 100.0) << ", Aggressive ";
         printFill(msg.aggressiveOrderFill) << ", Resting ";
         printFill(msg.restingOrderFill) << std::endl;
     }
     void onError(OrderID orderID, MsgType msgType, ErrCode errCode, const std::string &errMsg) {
-        if (errCode == ErrCode::UnknownOrderID) {
-            // ignore due to dirty input
-            return;
-        }
+        // if (errCode == ErrCode::UnknownOrderID) {
+        //     // ignore due to dirty input
+        //     return;
+        // }
         formatError(estream, orderID, msgType, errCode, errMsg);
     }
     void onLog(OrderID orderID, MsgType msgType, const std::string &msg) {
@@ -386,10 +395,17 @@ struct EventDetailPrinter {
 };
 
 struct NUllBookEventReporter {
-    int64_t requestSeq = -1;
-    void    onTrade(const TradeMsg &msg) {}
-    void    onError(OrderID orderID, MsgType msgType, ErrCode errCode, const std::string &errMsg) {}
-    void    onLog(OrderID orderID, MsgType msgType, const std::string &msg) {}
+    int64_t               requestSeq = -1;
+    std::vector<TradeMsg> lastTrades; // save trades for last aggressive order.
+
+    void onTrade(const TradeMsg &msg) {
+        if (!lastTrades.empty() && lastTrades.back().aggressiveOrderFill.orderID != msg.aggressiveOrderFill.orderID) {
+            lastTrades.clear(); // it's a new aggressive order
+        }
+        lastTrades.push_back(msg);
+    }
+    void onError(OrderID orderID, MsgType msgType, ErrCode errCode, const std::string &errMsg) {}
+    void onLog(OrderID orderID, MsgType msgType, const std::string &msg) {}
 };
 
 static_assert(BookEventReporter<NUllBookEventReporter>, "NUllBookEventReporter Impl BookEventReporter");
