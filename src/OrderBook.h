@@ -5,6 +5,7 @@
 #include <list>
 #include <algorithm>
 #include <iostream>
+#include <string>
 #include <assert.h>
 #include <stdint.h>
 
@@ -224,7 +225,7 @@ public:
 
     std::pair<CentPrice, int> getTopPriceAndOrders() const {
         if (_priceQue.empty()) return {};
-        return {_priceQue.front().price, _priceQue.front().iterMap->second.size()};
+        return {_priceQue.front().price, (int)_priceQue.front().iterMap->second.size()};
     }
 
 private:

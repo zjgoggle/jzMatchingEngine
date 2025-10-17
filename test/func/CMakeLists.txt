@@ -25,4 +25,4 @@ target_include_directories(${targetname} SYSTEM PUBLIC
 )
 target_compile_definitions(${targetname} PRIVATE TEST_CONFIG_IMPLEMENT_MAIN=1) # convert to a test
 
-add_test(NAME ${targetname}  COMMAND $<TARGET_FILE:${targetname}>)
+# add_test(NAME ${targetname}  COMMAND $<TARGET_FILE:${targetname}>) Do not run test which needs external data file

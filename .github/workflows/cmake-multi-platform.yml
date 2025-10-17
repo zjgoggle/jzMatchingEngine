@@ -45,7 +45,12 @@ jobs:
             c_compiler: cl
 
     steps:
-    - uses: actions/checkout@v4
+    - name: Checkout repository and submodules
+      uses: actions/checkout@v4
+      with:
+        submodules: 'true' # This is the key setting
+        # If your submodules are in private repositories, you may need to provide a token:
+        # token: ${{ secrets.YOUR_TOKEN_WITH_SUBMODULE_ACCESS }}
 
     - name: Set reusable strings
       # Turn repeated input strings (such as the build output directory) into step outputs. These step outputs can be used throughout the workflow file.

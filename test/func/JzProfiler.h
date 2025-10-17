@@ -328,3 +328,5 @@ struct JzScopedProfRecorder {
 
 //-- debug&release JZ_PROF_ADD: add a profiler. return a pointer to added profiler.
 #define JZ_PROF_ADD(profname) JzProfilerStore::instance().add({__FILE__, __LINE__, __PRETTY_FUNCTION__, #profname})
+
+#define JZ_PROF_GLOBAL(profname) JzProfilerStore::instance().add({__FILE__, __LINE__, "", #profname})

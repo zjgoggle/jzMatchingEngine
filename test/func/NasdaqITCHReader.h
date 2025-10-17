@@ -28,7 +28,7 @@ struct SizedInt {
     static_assert(N <= 8, "Support upto 64 bytes int only");
     using RoundupInt = std::conditional_t<N <= 4, std::conditional_t<N <= 2, std::conditional_t<N <= 1, int8_t, int16_t>, int32_t>, int64_t>;
     static constexpr size_t     MAX_SIZE        = N;
-    static constexpr RoundupInt MAX_VAL         = (1 << (8 * N - 1)) - 1;
+    static constexpr RoundupInt MAX_VAL         = (RoundupInt(1) << (8 * N - 1)) - 1;
     static constexpr size_t     FACTOR_TO_FLOAT = factorToFloat;
     static constexpr int        SUBTYPE         = subtype;
 
@@ -84,7 +84,7 @@ inline std::string formatTimestamp(int64_t nanosSinceMidnight) {
     std::string res;
     res.resize(18);
     char *buf  = (char *)res.data();
-    int   secs = nanosSinceMidnight / 1000000000LL, nanos = nanosSinceMidnight % 1000000000LL;
+    int   secs = int(nanosSinceMidnight / 1000000000LL), nanos = int(nanosSinceMidnight % 1000000000LL);
     sprintf(buf, "%02d:", secs / 3600);
     secs %= 3600;
     sprintf(buf + 3, "%02d:", secs / 60);

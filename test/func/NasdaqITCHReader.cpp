@@ -39,11 +39,11 @@ const char *print_time(char *buffer = nullptr, timespec ts = {-1, -1}, const cha
     return buf;
 }
 
-static JzProfiler *profBookAddOrder       = JZ_PROF_ADD(BookAddOrder);
-static JzProfiler *profBookCancel         = JZ_PROF_ADD(BookCancel);
-static JzProfiler *profBookPartialCancel  = JZ_PROF_ADD(BookPartialCancel);
-static JzProfiler *profBookReplace        = JZ_PROF_ADD(BookReplace);
-static JzProfiler *profBookCancelExecuted = JZ_PROF_ADD(BookCancelExecuted);
+static JzProfiler *profBookAddOrder       = JZ_PROF_GLOBAL(BookAddOrder);
+static JzProfiler *profBookCancel         = JZ_PROF_GLOBAL(BookCancel);
+static JzProfiler *profBookPartialCancel  = JZ_PROF_GLOBAL(BookPartialCancel);
+static JzProfiler *profBookReplace        = JZ_PROF_GLOBAL(BookReplace);
+static JzProfiler *profBookCancelExecuted = JZ_PROF_GLOBAL(BookCancelExecuted);
 
 // -1 for all
 constexpr int64_t INTERESTED_STOCK = 5336; // MU
