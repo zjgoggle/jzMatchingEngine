@@ -6,9 +6,9 @@
 #include <algorithm>
 #include <iostream>
 #include <string>
+#include <chrono>
 #include <assert.h>
 #include <stdint.h>
-
 
 #define ASSERT_OP(a, OP, b)                                                                                                                         \
     std::invoke(                                                                                                                                    \
@@ -76,16 +76,30 @@ concept BookEventReporter = requires(T t, TradeMsg tradeMsg, OrderID orderID, Ms
     { t.onLog(orderID, msgType, errMsg) } -> std::same_as<void>;
 };
 
+inline int64_t getSteadyNanos() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+};
+
+inline int64_t getSystemNanos() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+};
+
 namespace internal {
 /// @brief OrderInfo contains order info needed by order book.
 struct OrderInfo {
+    OrderInfo(OrderID aOrderID, Qty aQty, CentPrice aPrice) : orderID(aOrderID), qty(aQty), price(aPrice) {}
     OrderID   orderID{};
     Qty       qty{};
     CentPrice price{};
 };
 
-using OrderList           = std::list<OrderInfo>;
-using OrderListByPriceMap = std::unordered_map<CentPrice, OrderList>;
+using OrderList = std::list<OrderInfo>;
+// using OrderList = PooledIntrusiveList<OrderInfo>;
+struct LevelOrders {
+    OrderList orderList;
+};
+
+using OrderListByPriceMap = std::unordered_map<CentPrice, LevelOrders>;
 
 /// OrderKey identifies an order in a book.
 struct OrderKey {
@@ -142,15 +156,14 @@ public:
     /// Add order to book.
     void addNewOrder(OrderID orderID, Qty qty, CentPrice price) {
         //- use the hashmap to find the price level.
-        auto [iterMap, inserted] = _levelsByPriceMap.try_emplace(price);
-        if (inserted) // it's a new level. add to queue
-        {
+        auto [iterMap, bInserted] = _levelsByPriceMap.try_emplace(price);
+        if (bInserted) {
             _priceQue.push_back(PriceLevel{price, iterMap});
-            std::push_heap(_priceQue.begin(), _priceQue.end(), *compare_price);
+            pushPriceLevel();
         }
         //- add order to orderlist
-        OrderList &orderList = iterMap->second;
-        orderList.push_back(OrderInfo{.orderID = orderID, .qty = qty, .price = price});
+        OrderList &orderList = iterMap->second.orderList;
+        orderList.emplace_back(orderID, qty, price);
         if (orderList.size() == 1) { ++_nPriceLevels; }
         bool ok = _orderKeyByOrderIDMap.try_emplace(orderID, OrderKey{.side = _side, .iterList = --orderList.end(), .iterMap = iterMap}).second;
         assert(ok && "Logic Error: orderID has been checked before calling addNewOrder");
@@ -160,12 +173,12 @@ public:
     /// @return remaining qty after match
     Qty tryMatchOtherSide(OrderID orderID, Qty qty, CentPrice price, BookEventReporter auto &&tradeReporter) {
         while (qty && !_priceQue.empty() && (*can_match)(_priceQue.front(), price)) {
-            if (_priceQue.front().iterMap->second.empty()) {
+            if (_priceQue.front().iterMap->second.orderList.empty()) {
                 removeTopEmptyPriceLevel();
             } else {
-                internal::PriceLevel &thisLevel = _priceQue.front();
-                internal::OrderList  &orderList = thisLevel.iterMap->second;
-                internal::OrderInfo  &orderInfo = orderList.front();
+                internal::PriceLevel  &thisLevel   = _priceQue.front();
+                internal::LevelOrders &levelOrders = thisLevel.iterMap->second;
+                internal::OrderInfo   &orderInfo   = levelOrders.orderList.front();
 
                 Qty matchQty = std::min(qty, orderInfo.qty);
                 qty -= matchQty;
@@ -179,7 +192,7 @@ public:
                                                        .tradePrice          = thisLevel.price,
                                                        .aggressiveOrderFill = TradeMsg::Fill{.isFull = true, .orderID = orderID},
                                                        .restingOrderFill    = TradeMsg::Fill{.isFull = true, .orderID = orderInfo.orderID}});
-                        removeOrderFromBookTop(orderList, orderInfo);
+                        removeOrderFromBookTop(levelOrders, orderInfo);
                     } else {
                         // restingOrder partially filled
                         tradeReporter.onTrade(TradeMsg{
@@ -194,7 +207,7 @@ public:
                                                    .tradePrice          = thisLevel.price,
                                                    .aggressiveOrderFill = TradeMsg::Fill{.isFull = false, .orderID = orderID, .leaveQty = qty},
                                                    .restingOrderFill    = TradeMsg::Fill{.isFull = true, .orderID = orderInfo.orderID}});
-                    removeOrderFromBookTop(orderList, orderInfo);
+                    removeOrderFromBookTop(levelOrders, orderInfo);
                 }
             }
         }
@@ -203,13 +216,13 @@ public:
     }
 
     void cancelOrder(OrderKeyByOrderIDMap::iterator iterKey) {
-        OrderList &orderList = iterKey->second.iterMap->second;
-        orderList.erase(iterKey->second.iterList);
+        LevelOrders &levelOrders = iterKey->second.iterMap->second;
+        levelOrders.orderList.erase(iterKey->second.iterList);
         _orderKeyByOrderIDMap.erase(iterKey);
         --_nOrders;
-        if (orderList.empty()) {
+        if (levelOrders.orderList.empty()) {
             --_nPriceLevels;
-            while (!_priceQue.empty() && _priceQue.front().iterMap->second.empty()) { removeTopEmptyPriceLevel(); }
+            while (!_priceQue.empty() && _priceQue.front().iterMap->second.orderList.empty()) { removeTopEmptyPriceLevel(); }
             // if it's not the top level, leave the empty level in book.
         }
     }
@@ -219,28 +232,32 @@ public:
     /// PriceQueueSize >= PriceLevels. There may be empty price levels in queue.
     int getPriceQueueSize() const { return _priceQue.size(); }
     int countOrdersAtPrice(CentPrice price) const {
-        if (auto it = _levelsByPriceMap.find(price); it != _levelsByPriceMap.end()) return it->second.size();
+        if (auto it = _levelsByPriceMap.find(price); it != _levelsByPriceMap.end()) return it->second.orderList.size();
         return 0;
     }
 
     std::pair<CentPrice, int> getTopPriceAndOrders() const {
         if (_priceQue.empty()) return {};
-        return {_priceQue.front().price, (int)_priceQue.front().iterMap->second.size()};
+        return {_priceQue.front().price, (int)_priceQue.front().iterMap->second.orderList.size()};
     }
 
 private:
+#define USE_HEAP_NAME std // JzBinHeap // or std
+    void pushPriceLevel() {
+        USE_HEAP_NAME::push_heap(_priceQue.begin(), _priceQue.end(), *compare_price); //
+    }
     void removeTopEmptyPriceLevel() {
         assert(!_priceQue.empty());
         _levelsByPriceMap.erase(_priceQue.front().iterMap);
-        std::pop_heap(_priceQue.begin(), _priceQue.end(), *compare_price);
+        USE_HEAP_NAME::pop_heap(_priceQue.begin(), _priceQue.end(), *compare_price);
         _priceQue.pop_back();
     }
 
-    void removeOrderFromBookTop(internal::OrderList &orderList, internal::OrderInfo &orderInfo) {
+    void removeOrderFromBookTop(internal::LevelOrders &levelOrders, internal::OrderInfo &orderInfo) {
         _orderKeyByOrderIDMap.erase(orderInfo.orderID);
-        orderList.pop_front();
+        levelOrders.orderList.pop_front();
         --_nOrders;
-        if (orderList.empty()) {
+        if (levelOrders.orderList.empty()) {
             --_nPriceLevels;
             removeTopEmptyPriceLevel();
         }
@@ -253,10 +270,10 @@ private:
 template<BookEventReporter BookEventReporterT>
 class OrderBook {
     BookEventReporterT               &_eventReporter;
-    internal::OrderKeyByOrderIDMap    _orderKeyByOrderIDMap; // elements are added/deleted in internal::Book.
+    internal::OrderKeyByOrderIDMap    _orderKeyByOrderIDMap; // elements are added/deleted in internal::SideBook.
     std::array<internal::SideBook, 2> _books;                // buy & sell books
 public:
-    explicit OrderBook(BookEventReporterT &reporter, size_t reserveOrders = 20000, size_t reservePriceLevelsPerSide = 2048)
+    explicit OrderBook(BookEventReporterT &reporter, size_t reserveOrders = 50000, size_t reservePriceLevelsPerSide = 8192)
         : _eventReporter(reporter),
           _books{internal::SideBook{_orderKeyByOrderIDMap, Side::Buy, reserveOrders, reservePriceLevelsPerSide},
                  internal::SideBook{_orderKeyByOrderIDMap, Side::Sell, reserveOrders, reservePriceLevelsPerSide}} {

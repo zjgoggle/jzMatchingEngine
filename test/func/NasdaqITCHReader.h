@@ -258,12 +258,17 @@ struct BrokenTrade {
 //------------------------------------------------------------------
 
 template<class Msg>
-void printMsg(const Msg &msg, std::ostream &os = std::cout) {
+struct PrintMsg {
+    const Msg &msg;
+};
+
+template<class Msg>
+std::ostream &operator<<(std::ostream &os, const PrintMsg<Msg> &msg) {
     os << "Msg: " << Msg::NAME;
-    boost::pfr::for_each_field_with_name(msg, [&]<typename T>(std::string_view name, const T &field) {
+    boost::pfr::for_each_field_with_name(msg.msg, [&]<typename T>(std::string_view name, const T &field) {
         os << ", " << name << ": " << field; //
     });
-    os << std::endl;
+    return os << std::endl;
 }
 
 template<class Msg>
@@ -296,7 +301,7 @@ size_t readMsg(Msg &msg, const char *buf, size_t buflen) {
 
 } // namespace NasdaqITCH
 
-// call onMessage(size_t seqnum, Msg&) for each message.
+// call onMessage(size_t seqnum, Msg&, std::string_view raw) for raw message begining with {int16_t reversed_bodyLen; char msgType}
 template<class OnMessage>
 void read_nasdaq_itch(const std::string &filename, OnMessage &&onMessage) {
     std::ifstream file(filename, std::ios::in | std::ios::binary);
@@ -309,24 +314,24 @@ void read_nasdaq_itch(const std::string &filename, OnMessage &&onMessage) {
     file.seekg(0, std::ios::beg);
 
     constexpr size_t MAX_BODY_LEN = 256;
-    char             buf[MAX_BODY_LEN];
+    char             buf[MAX_BODY_LEN + 2];
     size_t           offset = 0;
     for (size_t nMsg = 0; file.read(buf, 2); ++nMsg) {
         offset += 2;
         SizedInt<2> bodyLen; // packet body len == msgLen
         bodyLen.read(buf);
         assert(bodyLen.value < MAX_BODY_LEN);
-        if (!file.read(buf, bodyLen.value)) {
+        if (!file.read(buf + 2, bodyLen.value)) {
             std::cerr << "Failed to read msg body len: " << bodyLen.value << std::endl;
             exit(1);
         }
         offset += bodyLen.value;
 
         auto readAndPrintMsg = [&]<typename Msg>(Msg msg) {
-            ASSERT_EQ(bodyLen.value, readMsg(msg, buf, bodyLen.value));
-            onMessage(nMsg, msg);
+            ASSERT_EQ(bodyLen.value, readMsg(msg, buf + 2, bodyLen.value));
+            onMessage(nMsg, msg, std::string_view{buf, size_t(bodyLen.value) + 2});
         };
-        switch (NasdaqITCH::MsgType(buf[0])) {
+        switch (NasdaqITCH::MsgType(buf[2])) {
             case NasdaqITCH::MsgType::SystemEvent:
             // Stock
             case NasdaqITCH::MsgType::StockDirectory:
@@ -388,7 +393,7 @@ void read_nasdaq_itch(const std::string &filename, OnMessage &&onMessage) {
             case NasdaqITCH::MsgType::DirectListingWithCapitalRaise: //
                 break;
             default: //
-                std::cerr << "Undefined msg type: " << buf[0] << std::endl;
+                std::cerr << "Undefined msg type: " << buf[2] << std::endl;
                 exit(1);
         }
     }

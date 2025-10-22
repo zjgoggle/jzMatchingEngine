@@ -139,11 +139,14 @@ struct JzProfiler {
         *_params.ostream << std::endl;
         reset();
     }
-    void startRecord() { _samples.back() = get_cpu_ticks(); }
-    void stopRecord() {
-        _samples.back() = get_cpu_ticks() - _samples.back();
+    // return cpu ticks
+    int64_t startRecord() { return _samples.back() = get_cpu_ticks(); }
+    // return duration since last call of startRecord()
+    int64_t stopRecord() {
+        int64_t dur = _samples.back() = get_cpu_ticks() - _samples.back();
         if (_samples.size() == _params.nSamples) reportStatsAndReset();
         else _samples.emplace_back();
+        return dur;
     }
     int64_t nanosAt(size_t idx) const { return _samples[std::min(idx, _samples.size() - 2)] / _params.ticksPerNano; }
 
