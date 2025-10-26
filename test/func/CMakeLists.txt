@@ -11,7 +11,7 @@ target_include_directories(${targetname} SYSTEM PUBLIC
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/external/pfr/include
 )
-
+target_link_libraries(${targetname} absl::flat_hash_map)
 #=================================================
 #    SimpleMatchingEngineMain-Test
 #=================================================
@@ -24,5 +24,6 @@ target_include_directories(${targetname} SYSTEM PUBLIC
     ${CMAKE_SOURCE_DIR}/external/pfr/include
 )
 target_compile_definitions(${targetname} PRIVATE TEST_CONFIG_IMPLEMENT_MAIN=1) # convert to a test
+target_link_libraries(${targetname} absl::flat_hash_map)
 
 # add_test(NAME ${targetname}  COMMAND $<TARGET_FILE:${targetname}>) Do not run test which needs external data file

@@ -38,10 +38,10 @@
 #define __PRETTY_FUNCTION__ __FUNCSIG__
 #endif
 
-// auto report stats when reaching JZPROFILER_DEFAULT_SAMPLES.
-// it can be changed by modifying JzProfilerStore::instance()._params.nSamples. Then subsequent JZ_PROF_FUNC() will be affected.
-#ifndef JZPROFILER_DEFAULT_SAMPLES
-#define JZPROFILER_DEFAULT_SAMPLES 10000
+// auto report stats when reaching JZPROFILER_DEFAULT_BATCHSIZE.
+// it can be changed by modifying JzProfilerStore::instance().setBatchSize(n). Then subsequent JZ_PROF_FUNC() will be affected.
+#ifndef JZPROFILER_DEFAULT_BATCHSIZE
+#define JZPROFILER_DEFAULT_BATCHSIZE 10000
 #endif
 
 inline int64_t get_cpu_ticks() {
@@ -80,14 +80,26 @@ inline int64_t get_cpu_ticks() {
 #endif
 }
 
-inline float calcCPUTicksPerNano() {
-    static constexpr int64_t DURATION_NANOS = 10000;
-    auto                     t              = std::chrono::steady_clock().now().time_since_epoch().count() + DURATION_NANOS;
-    auto                     c              = get_cpu_ticks();
-    while (std::chrono::steady_clock().now().time_since_epoch().count() < t) continue;
-    c = get_cpu_ticks() - c;
-    return float(c) / DURATION_NANOS;
+template<bool byTime = false, int64_t duration_nanos_or_ticks = 1000000>
+float calcCPUTicksPerNanoImpl() {
+    if constexpr (byTime) {
+        const auto t = std::chrono::steady_clock().now().time_since_epoch().count() + duration_nanos_or_ticks;
+
+        auto c = get_cpu_ticks();
+        while (std::chrono::steady_clock().now().time_since_epoch().count() < t) continue;
+        c = get_cpu_ticks() - c;
+        return float(c) / duration_nanos_or_ticks;
+    } else { // by ticks
+        const auto t         = get_cpu_ticks() + duration_nanos_or_ticks;
+        auto       startTime = std::chrono::steady_clock().now();
+        while (get_cpu_ticks() < t) continue;
+        auto tEnd  = get_cpu_ticks();
+        auto nanos = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock().now() - startTime).count();
+        return (tEnd - (t - duration_nanos_or_ticks)) / float(nanos);
+    }
 }
+
+inline float calcCPUTicksPerNano() { return (calcCPUTicksPerNanoImpl<true>() + calcCPUTicksPerNanoImpl<false>()) / 2; }
 
 struct JzSrcLocation {
     const char *filename; // string literal
@@ -100,20 +112,20 @@ struct JzSrcLocation {
 };
 
 struct JzProfilerParams {
-    size_t        nSamples;
+    size_t        nBatchSize;
     float         ticksPerNano;
     std::ostream *ostream = nullptr;
 };
 
 struct JzProfiler {
     JzProfiler(JzSrcLocation loc, const JzProfilerParams &params) : _loc(loc), _params(params) {
-        assert(_params.nSamples > 1);
-        _samples.reserve(_params.nSamples + 1);
+        assert(_params.nBatchSize > 1);
+        _samples.reserve(_params.nBatchSize + 1);
         _samples.resize(1); // allocate one initially
     }
     void        reset() { _samples.resize(1); }
     static void printStatsHeaderLine(std::ostream &os) {
-        os << "Samples\t  Min/Nanos\t\t  50% \t\t  99% \t\t  Max \t| \t location \t | \t function" << std::endl;
+        os << "Iterations\t Min/Nanos\t       50%\t       99%\t       Max\t| \t Location \t | \t Function" << std::endl;
     }
     std::ostream &printLocFields() const {
         *_params.ostream << _loc.srcLine() << " | " << _loc.funcString();
@@ -130,7 +142,7 @@ struct JzProfiler {
         size_t N = _samples.size() - 1;
         std::sort(_samples.begin(), --_samples.end());
         int w = 10;
-        *_params.ostream << std::setw(4) << N << "\t" << std::setw(w) << nanosAt(0) << "\t" << std::setw(w) << nanosAt(N / 2) << "\t" << std::setw(w)
+        *_params.ostream << std::setw(w) << N << "\t" << std::setw(w) << nanosAt(0) << "\t" << std::setw(w) << nanosAt(N / 2) << "\t" << std::setw(w)
                          << nanosAt(N * 0.99) << "\t" << std::setw(w)
                          << nanosAt(_samples.size() - (N == 1 ? 2 : 3)); // the second largest one as the largest.
         *_params.ostream << "\t| ";
@@ -144,9 +156,13 @@ struct JzProfiler {
     // return duration since last call of startRecord()
     int64_t stopRecord() {
         int64_t dur = _samples.back() = get_cpu_ticks() - _samples.back();
-        if (_samples.size() == _params.nSamples) reportStatsAndReset();
+        if (_samples.size() == _params.nBatchSize) reportStatsAndReset();
         else _samples.emplace_back();
         return dur;
+    }
+    int64_t getLastNanos() const {
+        assert(!empty());
+        return _samples[_samples.size() - 2];
     }
     int64_t nanosAt(size_t idx) const { return _samples[std::min(idx, _samples.size() - 2)] / _params.ticksPerNano; }
 
@@ -165,13 +181,26 @@ struct JzProfiler {
 };
 
 struct JzProfilerStore {
+    struct ProfilerTree {
+        JzProfiler                                *value = nullptr;
+        std::vector<std::unique_ptr<ProfilerTree>> children;
+    };
+    using ProfilerTreePtr = std::unique_ptr<ProfilerTree>;
+
     JzProfilerParams                            _params;
     std::unordered_map<std::string, JzProfiler> _profilers;
+    std::vector<ProfilerTreePtr>                _profilerTree; //the tree in built only once when the first report is called.
+    int64_t                                     _countReport = 0;
 
-    JzProfilerStore(size_t nSamples = JZPROFILER_DEFAULT_SAMPLES, std::ostream &os = std::cout) : _params{nSamples, calcCPUTicksPerNano(), &os} {}
+    JzProfilerStore(size_t nBatchSize = JZPROFILER_DEFAULT_BATCHSIZE, std::ostream &os = std::cout)
+        : _params{nBatchSize, calcCPUTicksPerNano(), &os} {}
 
     ~JzProfilerStore() { reportStatsAndReset(); }
 
+
+    void  setBatchSize(size_t nBatchSize) { _params.nBatchSize = nBatchSize; }
+    float getTicksPerNano() const { return _params.ticksPerNano; }
+    float calcTicksPerNano() { return _params.ticksPerNano = calcCPUTicksPerNano(); }
 
     // \pre The location has not been added before.
     JzProfiler *add(JzSrcLocation loc) {
@@ -196,10 +225,12 @@ struct JzProfilerStore {
                 }
             }
         };
-        static std::vector<ProfilerTreePtr> trees = buildProfilerTree(); // static trees to make sure it been built once.
+        if (_countReport++ == 0) {
+            _profilerTree = buildProfilerTree(); // static trees to make sure it been built once.
+        }
 
         My my;
-        my.printRec(trees);
+        my.printRec(_profilerTree);
     }
 
     static JzProfilerStore &instance() {
@@ -208,12 +239,6 @@ struct JzProfilerStore {
     }
 
 private:
-    struct ProfilerTree {
-        JzProfiler                                *value = nullptr;
-        std::vector<std::unique_ptr<ProfilerTree>> children;
-    };
-    using ProfilerTreePtr = std::unique_ptr<ProfilerTree>;
-
     std::vector<ProfilerTreePtr> buildProfilerTree() {
         struct My {
             static ProfilerTree *buildTree(std::unordered_map<JzProfiler *, ProfilerTree *> &treeByProf,
@@ -284,6 +309,14 @@ struct JzScopedProfRecorder {
         currlevel       = _parent;
         currlevel.nChild++;
     }
+};
+
+struct JzAutoProfiler {
+    explicit JzAutoProfiler(JzProfiler &prof) : _prof(prof) { _prof.startRecord(); }
+    ~JzAutoProfiler() { _prof.stopRecord(); }
+
+private:
+    JzProfiler &_prof;
 };
 
 #ifndef NDEBUG

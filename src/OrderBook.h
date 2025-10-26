@@ -70,10 +70,10 @@ struct TradeMsg {
 };
 
 template<class T>
-concept BookEventReporter = requires(T t, TradeMsg tradeMsg, OrderID orderID, MsgType msgType, ErrCode errCode, const std::string &errMsg) {
+concept BookEventReporter = requires(T t, TradeMsg &tradeMsg, OrderID orderID, MsgType msgType, ErrCode errCode, const std::string &errMsg) {
     { t.onTrade(tradeMsg) } -> std::same_as<void>;
     { t.onError(orderID, msgType, errCode, errMsg) } -> std::same_as<void>;
-    { t.onLog(orderID, msgType, errMsg) } -> std::same_as<void>;
+    // { t.onLog(orderID, msgType, errMsg) } -> std::same_as<void>; // optional
 };
 
 inline int64_t getSteadyNanos() {

@@ -116,6 +116,14 @@
         "stdfloat": "cpp",
         "__nullptr": "cpp",
         "__config": "cpp",
-        "text_encoding": "cpp"
+        "text_encoding": "cpp",
+        "__locale": "cpp",
+        "__bit_reference": "cpp",
+        "__hash_table": "cpp",
+        "__split_buffer": "cpp",
+        "__tree": "cpp",
+        "version": "cpp",
+        "__node_handle": "cpp",
+        "__string": "cpp"
     },
 }

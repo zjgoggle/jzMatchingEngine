@@ -316,7 +316,8 @@ void read_nasdaq_itch(const std::string &filename, OnMessage &&onMessage) {
     constexpr size_t MAX_BODY_LEN = 256;
     char             buf[MAX_BODY_LEN + 2];
     size_t           offset = 0;
-    for (size_t nMsg = 0; file.read(buf, 2); ++nMsg) {
+    bool             bExit  = false;
+    for (size_t nMsg = 0; !bExit && file.read(buf, 2); ++nMsg) {
         offset += 2;
         SizedInt<2> bodyLen; // packet body len == msgLen
         bodyLen.read(buf);
@@ -329,7 +330,12 @@ void read_nasdaq_itch(const std::string &filename, OnMessage &&onMessage) {
 
         auto readAndPrintMsg = [&]<typename Msg>(Msg msg) {
             ASSERT_EQ(bodyLen.value, readMsg(msg, buf + 2, bodyLen.value));
-            onMessage(nMsg, msg, std::string_view{buf, size_t(bodyLen.value) + 2});
+            using Ret = std::invoke_result_t<OnMessage, size_t, Msg &, std::string_view>;
+            if constexpr (std::is_same_v<void, Ret>) {
+                onMessage(nMsg, msg, std::string_view{buf, size_t(bodyLen.value) + 2});
+            } else {
+                if (not onMessage(nMsg, msg, std::string_view{buf, size_t(bodyLen.value) + 2})) bExit = true;
+            }
         };
         switch (NasdaqITCH::MsgType(buf[2])) {
             case NasdaqITCH::MsgType::SystemEvent:

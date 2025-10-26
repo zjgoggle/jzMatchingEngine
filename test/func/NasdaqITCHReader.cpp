@@ -2,15 +2,10 @@
 #include "NasdaqITCHReader.h"
 #include <chrono>
 
-#define JZPROFILER_DEFAULT_SAMPLES 500000
+#define JZPROFILER_DEFAULT_BATCHSIZE 500000
 #include "JzProfiler.h"
 
-template<BookEventReporter TradeReporterT = EventDetailPrinter> // NUllBookEventReporter> // EventDetailPrinter>
-struct OrderBookAndReporter {
-    TradeReporterT            tradeReporter;
-    OrderBook<TradeReporterT> book{tradeReporter};
-    OrderBookAndReporter() : book(tradeReporter) {}
-};
+#include <absl/container/flat_hash_map.h>
 
 template<size_t subsecondDigits = 6, bool bUTCTime = false>
 const char *print_time(char *buffer = nullptr, timespec ts = {-1, -1}, const char *timeFmt = "%Y%m%d-%T") {
@@ -39,6 +34,15 @@ const char *print_time(char *buffer = nullptr, timespec ts = {-1, -1}, const cha
     return buf;
 }
 
+template<BookEventReporter TradeReporterT = EventDetailPrinter> // NUllBookEventReporter> // EventDetailPrinter>
+struct OrderBookAndReporter {
+    TradeReporterT            tradeReporter;
+    OrderBook<TradeReporterT> book{tradeReporter};
+    OrderBookAndReporter() : book(tradeReporter) {}
+};
+
+using SymbolID = int32_t;
+
 struct MsgStats {
     JzProfiler *prof      = nullptr;
     int64_t     countMsgs = 0, maxDurationTicks = 0;
@@ -46,16 +50,151 @@ struct MsgStats {
     float maxDruationNanos() const { return maxDurationTicks / prof->_params.ticksPerNano; }
 };
 
-static MsgStats statsAddOrder{.prof = JZ_PROF_GLOBAL(BookAddOrder)};
-static MsgStats statsCancel{.prof = JZ_PROF_GLOBAL(BookCancel)};
-static MsgStats statsPartialCancel{.prof = JZ_PROF_GLOBAL(BookPartialCancel)};
-static MsgStats statsReplace{.prof = JZ_PROF_GLOBAL(BookReplace)};
-static MsgStats statsCancelExected{.prof = JZ_PROF_GLOBAL(BookCancelExecuted)};
+//============================================================================================
+//                     benchmark hashmap
+//============================================================================================
+template<class T>
+concept GatewayEvents = requires(T                  t,
+                                 int32_t            nanosSinceMidnight,
+                                 SymbolID           symbolID,
+                                 std::string const &symbol,
+                                 OrderID            orderID,
+                                 Qty                qty,
+                                 CentPrice          price,
+                                 Qty                tradeQty,
+                                 OrderID            newOrderID) {
+    { t.onNewOrder(nanosSinceMidnight, orderID, qty, price, symbolID, symbol) };
+    { t.onReplace(nanosSinceMidnight, orderID, newOrderID, qty, price) };
+    { t.onPartialCancel(nanosSinceMidnight, orderID, qty) };
+    { t.onCancel(nanosSinceMidnight, orderID) };
+    { t.onExecution(nanosSinceMidnight, orderID, tradeQty) };
+};
+
+struct GatwayOrderInfo {
+    OrderID     orderID;
+    Qty         qty;
+    CentPrice   price;
+    SymbolID    symbolID;
+    std::string symbol;
+    bool        isDone = false;
+};
+
+struct TestStdHashMap {
+    static constexpr const char *NAME = "StdUnorderedMap";
+    using Map                         = std::unordered_map<OrderID, GatwayOrderInfo>;
+};
+struct TestAbseilHashMap {
+    static constexpr const char *NAME = "AbseilFlatHashMap";
+    using Map                         = absl::flat_hash_map<OrderID, GatwayOrderInfo>;
+};
+
+template<typename OrderMap = TestStdHashMap>
+class Gateway {
+    using Map = typename OrderMap::Map;
+
+public:
+    void reserve(size_t nOrders) { _orders.reserve(nOrders); }
+
+    //- Impl GatewayEvents --------------------------------
+    void onNewOrder(int32_t nanosSinceMidnight, OrderID orderID, Qty qty, CentPrice price, SymbolID symbolID, std::string const &symbol) {
+        auto [_, inserted] = _orders.try_emplace(orderID, orderID, qty, price, symbolID, symbol);
+        assert(inserted);
+    }
+    void onReplace(int32_t nanosSinceMidnight, OrderID orderID, OrderID newOrderID, Qty qty, CentPrice price) {
+        auto it = _orders.find(orderID);
+        assert(it != _orders.end());
+        onNewOrder(nanosSinceMidnight, newOrderID, qty, price, it->second.symbolID, it->second.symbol);
+        erase(orderID);
+    }
+    void onPartialCancel(int32_t nanosSinceMidnight, OrderID orderID, Qty qty) {
+        auto it = _orders.find(orderID);
+        assert(it != _orders.end());
+        it->second.qty -= qty;
+        if (it->second.qty <= 0) erase(orderID);
+    }
+    void onCancel(int32_t nanosSinceMidnight, OrderID orderID) {
+        auto it = _orders.find(orderID);
+        assert(it != _orders.end());
+        it->second.isDone = true;
+        _orders.erase(it);
+    }
+    void onExecution(int32_t nanosSinceMidnight, OrderID orderID, Qty tradeQty) {
+        auto it = _orders.find(orderID);
+        assert(it != _orders.end());
+        it->second.qty -= tradeQty;
+        if (it->second.qty <= 0) erase(orderID);
+    }
+
+    size_t countOrders() const { return _orders.size(); }
+
+private:
+    void erase(OrderID orderID) { _orders.erase(orderID); }
+    Map  _orders;
+};
+static_assert(GatewayEvents<Gateway<TestStdHashMap>>);
+
+template<class TestHashMapT>
+void benchmark_gateway_hashmap(const std::string filename, int64_t insterestedStock = -1, int64_t maxtMsgs = -1, int64_t iterations = 1000000) {
+    JzProfilerStore::instance().setBatchSize(iterations + 100); // later macros takes this value.
+
+    static JzProfiler *profNewOrder      = JZ_PROF_GLOBAL(HashMapNewOrder);
+    static JzProfiler *profReplace       = JZ_PROF_GLOBAL(HashMapReplace);
+    static JzProfiler *profPartialCancel = JZ_PROF_GLOBAL(HashMapPartialCancel);
+    static JzProfiler *profCancel        = JZ_PROF_GLOBAL(HashMapCancel);
+    static JzProfiler *profExection      = JZ_PROF_GLOBAL(HashMapExecution);
+
+    Gateway<TestHashMapT> gateway;
+    int64_t               count = 0, nNewOrders = 0, nReplaces = 0;
+
+    const size_t RESERVED_MAP_SIZE = 50 * 1000000;
+    gateway.reserve(50 * 1000000);
+    std::cout << "------ benchmark " << TestHashMapT::NAME << ", iterations: " << iterations << ", reserve: " << RESERVED_MAP_SIZE << " ------"
+              << std::endl;
+
+    read_nasdaq_itch(filename, [&]<typename T>(size_t seqnum, T &msg, std::string_view) {
+        if (insterestedStock >= 0 && insterestedStock != msg.StockLocate.value) return true;
+        ++count;
+        if constexpr (std::is_same_v<T, NasdaqITCH::AddOrder> || std::is_same_v<T, NasdaqITCH::AddOrderWithoutMPID>) {
+            ++nNewOrders;
+            JzAutoProfiler autoprof(*profNewOrder);
+            gateway.onNewOrder(
+                    msg.Timestamp.value, msg.OrderReferenceNumber.value, msg.Shares.value, msg.Price.value, msg.StockLocate.value, msg.Stock.value);
+        } else if constexpr (std::is_same_v<T, NasdaqITCH::OrderPartialCancel>) {
+            JzAutoProfiler autoprof(*profPartialCancel);
+            gateway.onPartialCancel(msg.Timestamp.value, msg.OrderReferenceNumber.value, msg.CancelledShares.value);
+        } else if constexpr (std::is_same_v<T, NasdaqITCH::OrderDelete>) {
+            JzAutoProfiler autoprof(*profCancel);
+            gateway.onCancel(msg.Timestamp.value, msg.OrderReferenceNumber.value);
+        } else if constexpr (std::is_same_v<T, NasdaqITCH::OrderReplace>) {
+            ++nReplaces;
+            JzAutoProfiler autoprof(*profReplace);
+            gateway.onReplace(
+                    msg.Timestamp.value, msg.OrderReferenceNumber.value, msg.NewOrderReferenceNumber.value, msg.Shares.value, msg.Price.value);
+        } else if constexpr (std::is_same_v<T, NasdaqITCH::OrderExecutedWithoutPrice> || std::is_same_v<T, NasdaqITCH::OrderExecuted>) {
+            JzAutoProfiler autoprof(*profExection);
+            gateway.onExecution(msg.Timestamp.value, msg.OrderReferenceNumber.value, msg.Executedshares.value);
+        }
+        return count < iterations;
+    });
+    std::cout << print_time() << " nMsgs: " << count << ", nNewOrders: " << nNewOrders << ", nReplaces: " << nReplaces
+              << ", countHashMap: " << gateway.countOrders() << std::endl;
+    JzProfilerStore::instance().reportStatsAndReset();
+}
+
+//============================================================================================
+//                     OrderBook
+//============================================================================================
 
 // -1 for all
 constexpr int64_t INTERESTED_STOCK = 5336; // MU
 // supply order requeest to order book and print order events
 void run_with_order_book(const std::string filename, int64_t insterestedStock = INTERESTED_STOCK, int64_t maxtMsgs = -1) {
+    static MsgStats statsAddOrder{.prof = JZ_PROF_GLOBAL(BookAddOrder)};
+    static MsgStats statsCancel{.prof = JZ_PROF_GLOBAL(BookCancel)};
+    static MsgStats statsPartialCancel{.prof = JZ_PROF_GLOBAL(BookPartialCancel)};
+    static MsgStats statsReplace{.prof = JZ_PROF_GLOBAL(BookReplace)};
+    static MsgStats statsCancelExected{.prof = JZ_PROF_GLOBAL(BookCancelExecuted)};
+
     using SymbolID = int32_t;
     std::unordered_map<SymbolID, OrderBookAndReporter<>> bookMap;
 
@@ -63,7 +202,7 @@ void run_with_order_book(const std::string filename, int64_t insterestedStock = 
     static size_t count          = 0;
     int64_t       timeStart      = getSteadyNanos();
     read_nasdaq_itch(filename, [&]<typename T>(size_t seqnum, T &msg, std::string_view) {
-        if (insterestedStock >= 0 && insterestedStock != msg.StockLocate.value) return;
+        if (insterestedStock >= 0 && insterestedStock != msg.StockLocate.value) return true;
         auto &reporter = bookMap[msg.StockLocate.value].tradeReporter;
         auto &book     = bookMap[msg.StockLocate.value].book;
         if (++count % 100000 == 0) {
@@ -131,8 +270,7 @@ void run_with_order_book(const std::string filename, int64_t insterestedStock = 
             reporter.requestSeq = seqnum;
 
             lastRequestSeq = seqnum;
-            auto &book     = bookMap[msg.StockLocate.value].book;
-            bool  ok       = book.replaceOrder(msg.OrderReferenceNumber.value, msg.NewOrderReferenceNumber.value, msg.Shares.value, msg.Price.value);
+            bool ok        = book.replaceOrder(msg.OrderReferenceNumber.value, msg.NewOrderReferenceNumber.value, msg.Shares.value, msg.Price.value);
             ASSERT_TRUE(ok);
             statsReplace.prof->stopRecord();
         } else if constexpr (std::is_same_v<T, NasdaqITCH::OrderExecutedWithoutPrice> || std::is_same_v<T, NasdaqITCH::OrderExecuted>) {
@@ -163,24 +301,30 @@ void run_with_order_book(const std::string filename, int64_t insterestedStock = 
         } else if constexpr (std::is_same_v<T, NasdaqITCH::Trade> || std::is_same_v<T, NasdaqITCH::CrossTrade>) {
             // std::cout << "** Original trade seqnum: " << seqnum << ", lastRequestSeq: " << lastRequestSeq << ". ";
         }
-        if (maxtMsgs >= 0 && maxtMsgs <= count) {
-            std::cout << print_time() << " reached maxtMsgs: " << maxtMsgs << std::endl;
-            exit(0);
-        }
+        return maxtMsgs < 0 || maxtMsgs > count;
     });
     int64_t durationNanos = timeStart - getSteadyNanos();
     std::cout << print_time() << " " << count << " End. Nanos/msg: " << durationNanos / count << std::endl;
 }
 
+//============================================================================================
+//                     print messages
+//============================================================================================
+
 void run_print(const std::string filename, int64_t insterestedStock = -1, int64_t maxtMsgs = -1) {
     int64_t count = 0;
     read_nasdaq_itch(filename, [&]<typename T>(size_t seqnum, T &msg, std::string_view) {
-        if (insterestedStock >= 0 && insterestedStock != msg.StockLocate.value) return;
+        if (insterestedStock >= 0 && insterestedStock != msg.StockLocate.value) return true;
         ++count;
         std::cout << count << ", seqnum: " << seqnum << ", " << NasdaqITCH::PrintMsg{msg} << std::endl;
-        if (maxtMsgs >= 0 && maxtMsgs <= count) { exit(0); }
+        if (maxtMsgs >= 0 && maxtMsgs <= count) { return false; }
+        return true;
     });
 }
+
+//============================================================================================
+//                     chop
+//============================================================================================
 
 void run_chop(const std::string filename, const std::string &outfilename, int64_t insterestedStock = -1, int64_t maxtMsgs = -1) {
     std::ofstream outfile(outfilename.c_str(), std::ios::out | std::ios::binary);
@@ -199,78 +343,95 @@ void run_chop(const std::string filename, const std::string &outfilename, int64_
         if (maxtMsgs >= 0 && maxtMsgs <= count) {
             outfile.flush();
             printSumary() << "\n\tSuccessfully wrote " << count << " messages to file: " << outfilename << std::endl;
-            exit(0);
+            return false;
         } else if (count % 500000 == 0) {
             printSumary() << ", seqnum: " << seqnum << std::endl;
         }
+        return true;
     };
     read_nasdaq_itch(filename, [&]<typename T>(size_t seqnum, T &msg, std::string_view buf) {
-        if (insterestedStock >= 0 && insterestedStock != msg.StockLocate.value) return;
+        if (insterestedStock >= 0 && insterestedStock != msg.StockLocate.value) return true;
         switch (NasdaqITCH::MsgType(T::MSG_TYPE)) {
             case NasdaqITCH::MsgType::AddOrderWithoutMPID:
             case NasdaqITCH::MsgType::AddOrder:
                 ++nNewOrder;
-                writeMsg(seqnum, buf);
+                if (!writeMsg(seqnum, buf)) return false;
                 break;
             case NasdaqITCH::MsgType::OrderPartialCancel:
                 ++nPartialCancel;
-                writeMsg(seqnum, buf);
+                if (!writeMsg(seqnum, buf)) return false;
                 break;
             case NasdaqITCH::MsgType::OrderDelete:
                 ++nCancel;
-                writeMsg(seqnum, buf);
+                if (!writeMsg(seqnum, buf)) return false;
                 break;
             case NasdaqITCH::MsgType::OrderReplace:
                 ++nReplace;
-                writeMsg(seqnum, buf);
+                if (!writeMsg(seqnum, buf)) return false;
                 break;
             case NasdaqITCH::MsgType::OrderExecutedWithoutPrice:
             case NasdaqITCH::MsgType::OrderExecuted:
                 ++nExecution;
-                writeMsg(seqnum, buf);
+                if (!writeMsg(seqnum, buf)) return false;
                 break;
             case NasdaqITCH::MsgType::Trade:
             case NasdaqITCH::MsgType::CrossTrade:
             case NasdaqITCH::MsgType::BrokenTrade: // ignored
                 break;
         }
+        return true;
     });
     printSumary() << "\n\tSuccessfully wrote all " << count << " messages to file: " << outfilename << std::endl;
 }
 
 int main_func(int argc, const char *argv[]) {
+    enum class ActionMode {
+        Print,
+        OrderBook,
+        Chop,
+        BenchMap,
+    };
     auto usage = [&](std::string errstr) {
         if (!errstr.empty()) { std::cerr << "Arg Error: " << errstr << std::endl; }
-        std::cerr << "Usage:\n"
-                  << argv[0]
-                  << R"( -f <Path_to_Nasdaq_ITCH_File> [--orderbook|--print | --chop <destChopFile>] [--stockid stockID] [--msgs <maxtMsgs>]"
+        std::cerr
+                << "Usage:\n"
+                << argv[0]
+                << R"( -f <Path_to_Nasdaq_ITCH_File> [--orderbook| --print | --chop <destChopFile> | --bench-map <Iterations>] [--stockid stockID] [--msgs <maxtMsgs>]"
     <Path_to_Nasdaq_ITCH_File> E.g. https://emi.nasdaq.com/ITCH/Nasdaq%20ITCH/01302020.NASDAQ_ITCH50.gz
-    <destChopFile>            Chop binary file and write to destChopFile. <stock> and <maxSeqNum> applies.
-    --orderbook               Supply requests to orderbook and generate trades. 
+
+Actions (default print):
     --print                   Default. Print all order requests and trades from the file.
+    --chop <destChopFile>     Chop binary file and write to destChopFile. <stock> and <maxSeqNum> applies.
+    --orderbook               Supply requests to orderbook and generate trades. 
+    --bench-map <Iterations>  Benchmark hash map performance. Print latencies for each <Iterations>.
+    --help|-h                 Show this help message.
+
+Params:
     <stock>                   Interested stockID. Default -1 for all.
     <countMsgs>               The max number of messages for above actions. Default -1 for all.
-    --help|-h
  )" << std::endl;
         exit(!errstr.empty());
     };
 
-    bool        bOrderBook        = false;
-    int64_t     interestedStockID = -1, maxtMsgs = -1;
+    ActionMode  actionMode        = ActionMode::Print;
+    int64_t     interestedStockID = -1, maxMsgs = -1, iterations = 1000000;
     std::string dataFile, chopFile;
     for (int i = 1; i < argc; ++i) {
         if (argv[i] == std::string("-f")) {
             dataFile = argv[++i];
         } else if (argv[i] == std::string("--orderbook")) {
-            bOrderBook = true;
+            actionMode = ActionMode::OrderBook;
         } else if (argv[i] == std::string("--print")) {
-            bOrderBook = false;
+            actionMode = ActionMode::Print;
+        } else if (argv[i] == std::string("--bench-map")) {
+            actionMode = ActionMode::BenchMap;
+            iterations = std::strtoll(argv[++i], nullptr, 10);
         } else if (argv[i] == std::string("--chop")) {
             chopFile = argv[++i];
         } else if (argv[i] == std::string("--stockid")) {
             interestedStockID = std::strtoll(argv[++i], nullptr, 10);
         } else if (argv[i] == std::string("--msgs")) {
-            maxtMsgs = std::strtoll(argv[++i], nullptr, 10);
+            maxMsgs = std::strtoll(argv[++i], nullptr, 10);
         } else if (argv[i] == std::string("--help") || argv[i] == std::string("--h")) {
             usage("");
         } else {
@@ -279,12 +440,15 @@ int main_func(int argc, const char *argv[]) {
     }
     if (dataFile.empty()) { usage("No data file specified."); }
 
-    if (!chopFile.empty()) {
-        run_chop(dataFile, chopFile, interestedStockID, maxtMsgs);
-    } else if (bOrderBook) {
-        run_with_order_book(dataFile, interestedStockID, maxtMsgs); //
+    if (actionMode == ActionMode::Chop) {
+        run_chop(dataFile, chopFile, interestedStockID, maxMsgs);
+    } else if (actionMode == ActionMode::OrderBook) {
+        run_with_order_book(dataFile, interestedStockID, maxMsgs);
+    } else if (actionMode == ActionMode::BenchMap) {
+        benchmark_gateway_hashmap<TestStdHashMap>(dataFile, interestedStockID, maxMsgs, iterations);
+        benchmark_gateway_hashmap<TestAbseilHashMap>(dataFile, interestedStockID, maxMsgs, iterations);
     } else {
-        run_print(dataFile, interestedStockID, maxtMsgs); //
+        run_print(dataFile, interestedStockID, maxMsgs);
     }
     return 0;
 }
@@ -295,7 +459,8 @@ int main(int argc, const char *argv[]) { return main_func(argc, argv); }
 
 int main() {
     // 5336: MU , 13: APPL
-    char const *args[] = {"test", "-f", "../nasdaq-data/data/01302020.NASDAQ_ITCH50", "--orderbook", "--stockid", "13"};
+    char const *args[] = {"t", "-f", "../nasdaq-data/data/01302020.NASDAQ_ITCH50", "--bench-map", "10000000"};
+    // char const *args[] = {"t", "-f", "../nasdaq-data/data/01302020.NASDAQ_ITCH50", "--orderbook", "--stockid", "13"};
     main_func(sizeof(args) / sizeof(char *), args);
 }
 #endif // TEST_CONFIG_IMPLEMENT_MAIN
