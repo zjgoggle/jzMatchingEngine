@@ -109,6 +109,8 @@ std::ostream &operator<<(std::ostream &os, SizedInt<N, reverseBytes, factorToFlo
 //       Order Messages
 //------------------------------------------------------------------
 namespace NasdaqITCH {
+static constexpr int64_t MARKET_OPEN_TS = 34200000000000; // nanos since midnight : 9:30
+
 enum class MsgType : char {
     SystemEvent = 'S',
     // Stock

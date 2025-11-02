@@ -5,7 +5,9 @@
 #define JZPROFILER_DEFAULT_BATCHSIZE 500000
 #include "JzProfiler.h"
 
+#ifdef TEST_BENCH_HASH_MAP
 #include <absl/container/flat_hash_map.h>
+#endif
 
 template<size_t subsecondDigits = 6, bool bUTCTime = false>
 const char *print_time(char *buffer = nullptr, timespec ts = {-1, -1}, const char *timeFmt = "%Y%m%d-%T") {
@@ -34,8 +36,10 @@ const char *print_time(char *buffer = nullptr, timespec ts = {-1, -1}, const cha
     return buf;
 }
 
-template<BookEventReporter TradeReporterT = EventDetailPrinter> // NUllBookEventReporter> // EventDetailPrinter>
+template<BookEventReporter TradeReporterT = EventDetailPrinter,
+         PriceQueType      PriceQueT      = PriceQueType::Tree> // NUllBookEventReporter> // EventDetailPrinter>
 struct OrderBookAndReporter {
+    using BookType = OrderBook<TradeReporterT>;
     TradeReporterT            tradeReporter;
     OrderBook<TradeReporterT> book{tradeReporter};
     OrderBookAndReporter() : book(tradeReporter) {}
@@ -49,6 +53,8 @@ struct MsgStats {
 
     float maxDruationNanos() const { return maxDurationTicks / prof->_params.ticksPerNano; }
 };
+
+CentPrice NasdaqPriceToCentPrice(const ScaledPrice &price) { return price.value / 100; }
 
 //============================================================================================
 //                     benchmark hashmap
@@ -83,11 +89,12 @@ struct TestStdHashMap {
     static constexpr const char *NAME = "StdUnorderedMap";
     using Map                         = std::unordered_map<OrderID, GatwayOrderInfo>;
 };
+#ifdef TEST_BENCH_HASH_MAP
 struct TestAbseilHashMap {
     static constexpr const char *NAME = "AbseilFlatHashMap";
     using Map                         = absl::flat_hash_map<OrderID, GatwayOrderInfo>;
 };
-
+#endif
 template<typename OrderMap = TestStdHashMap>
 class Gateway {
     using Map = typename OrderMap::Map;
@@ -157,8 +164,12 @@ void benchmark_gateway_hashmap(const std::string filename, int64_t insterestedSt
         if constexpr (std::is_same_v<T, NasdaqITCH::AddOrder> || std::is_same_v<T, NasdaqITCH::AddOrderWithoutMPID>) {
             ++nNewOrders;
             JzAutoProfiler autoprof(*profNewOrder);
-            gateway.onNewOrder(
-                    msg.Timestamp.value, msg.OrderReferenceNumber.value, msg.Shares.value, msg.Price.value, msg.StockLocate.value, msg.Stock.value);
+            gateway.onNewOrder(msg.Timestamp.value,
+                               msg.OrderReferenceNumber.value,
+                               msg.Shares.value,
+                               NasdaqPriceToCentPrice(msg.Price),
+                               msg.StockLocate.value,
+                               msg.Stock.value);
         } else if constexpr (std::is_same_v<T, NasdaqITCH::OrderPartialCancel>) {
             JzAutoProfiler autoprof(*profPartialCancel);
             gateway.onPartialCancel(msg.Timestamp.value, msg.OrderReferenceNumber.value, msg.CancelledShares.value);
@@ -168,8 +179,11 @@ void benchmark_gateway_hashmap(const std::string filename, int64_t insterestedSt
         } else if constexpr (std::is_same_v<T, NasdaqITCH::OrderReplace>) {
             ++nReplaces;
             JzAutoProfiler autoprof(*profReplace);
-            gateway.onReplace(
-                    msg.Timestamp.value, msg.OrderReferenceNumber.value, msg.NewOrderReferenceNumber.value, msg.Shares.value, msg.Price.value);
+            gateway.onReplace(msg.Timestamp.value,
+                              msg.OrderReferenceNumber.value,
+                              msg.NewOrderReferenceNumber.value,
+                              msg.Shares.value,
+                              NasdaqPriceToCentPrice(msg.Price));
         } else if constexpr (std::is_same_v<T, NasdaqITCH::OrderExecutedWithoutPrice> || std::is_same_v<T, NasdaqITCH::OrderExecuted>) {
             JzAutoProfiler autoprof(*profExection);
             gateway.onExecution(msg.Timestamp.value, msg.OrderReferenceNumber.value, msg.Executedshares.value);
@@ -188,6 +202,7 @@ void benchmark_gateway_hashmap(const std::string filename, int64_t insterestedSt
 // -1 for all
 constexpr int64_t INTERESTED_STOCK = 5336; // MU
 // supply order requeest to order book and print order events
+template<PriceQueType PriceQueT>
 void run_with_order_book(const std::string filename, int64_t insterestedStock = INTERESTED_STOCK, int64_t maxtMsgs = -1) {
     static MsgStats statsAddOrder{.prof = JZ_PROF_GLOBAL(BookAddOrder)};
     static MsgStats statsCancel{.prof = JZ_PROF_GLOBAL(BookCancel)};
@@ -196,23 +211,34 @@ void run_with_order_book(const std::string filename, int64_t insterestedStock = 
     static MsgStats statsCancelExected{.prof = JZ_PROF_GLOBAL(BookCancelExecuted)};
 
     using SymbolID = int32_t;
-    std::unordered_map<SymbolID, OrderBookAndReporter<>> bookMap;
+    std::unordered_map<SymbolID, OrderBookAndReporter<EventDetailPrinter, PriceQueT>> bookMap;
 
     int64_t       lastRequestSeq = -1;
     static size_t count          = 0;
-    int64_t       timeStart      = getSteadyNanos();
+    int64_t       timeStart = getSteadyNanos(), lastPrintTime = 0;
     read_nasdaq_itch(filename, [&]<typename T>(size_t seqnum, T &msg, std::string_view) {
         if (insterestedStock >= 0 && insterestedStock != msg.StockLocate.value) return true;
-        auto &reporter = bookMap[msg.StockLocate.value].tradeReporter;
-        auto &book     = bookMap[msg.StockLocate.value].book;
-        if (++count % 100000 == 0) {
-            auto topBuy = book.getTopPriceAndOrders(Side::Buy), topSell = book.getTopPriceAndOrders(Side::Sell);
-            std::cout << print_time() << " " << count << " ** " << seqnum << ", Buy-nOrders: " << book.countOrders(Side::Buy)
-                      << ", nPrices: " << book.countPriceLevels(Side::Buy) << ", QueSize: " << book.getPriceQueueSize(Side::Buy)
-                      << ", TopPrice: " << topBuy.first << ", TopOrders: " << topBuy.second << " -- Sell-nOrders: " << book.countOrders(Side::Sell)
-                      << ", nPrices: " << book.countPriceLevels(Side::Sell) << ", QueSize: " << book.getPriceQueueSize(Side::Sell)
-                      << ", TopPrice: " << topBuy.first << ", TopOrders: " << topBuy.second << std::endl;
-            // std::cout << ‘NasdaqITCH::PrintMsg’{msg} << std::endl;
+        auto                    &reporter      = bookMap[msg.StockLocate.value].tradeReporter;
+        auto                    &book          = bookMap[msg.StockLocate.value].book;
+        static constexpr int64_t ONE_MINUTE_NS = 1000000000LL * 60;
+        // print every 30 min only when market opens
+        if (msg.Timestamp.value >= lastPrintTime + 30 * ONE_MINUTE_NS && msg.Timestamp.value >= NasdaqITCH::MARKET_OPEN_TS) {
+            if constexpr (PriceQueT == PriceQueType::Tree) {
+                lastPrintTime = msg.Timestamp.value;
+                std::cout << NasdaqITCH::PrintMsg{msg} << std::endl;
+                book.printPriceLevels(std::cout) << std::endl;
+                std::cout << "press any key to continue...";
+                std::getchar();
+            } else {
+                auto topBuy = book.getTopPriceAndOrders(Side::Buy), topSell = book.getTopPriceAndOrders(Side::Sell);
+                std::cout << print_time() << " " << count << " ** " << seqnum << ", Buy-nOrders: " << book.countOrders(Side::Buy)
+                          << ", nPrices: " << book.countPriceLevels(Side::Buy) << ", QueSize: " << book.getPriceQueueSize(Side::Buy)
+                          << ", TopPrice: " << topBuy.first << ", TopOrders: " << topBuy.second
+                          << " -- Sell-nOrders: " << book.countOrders(Side::Sell) << ", nPrices: " << book.countPriceLevels(Side::Sell)
+                          << ", QueSize: " << book.getPriceQueueSize(Side::Sell) << ", TopPrice: " << topBuy.first
+                          << ", TopOrders: " << topBuy.second << std::endl;
+                std::cout << NasdaqITCH::PrintMsg{msg} << std::endl;
+            }
         }
         if constexpr (std::is_same_v<T, NasdaqITCH::AddOrder> || std::is_same_v<T, NasdaqITCH::AddOrderWithoutMPID>) {
             ++statsAddOrder.countMsgs;
@@ -228,7 +254,7 @@ void run_with_order_book(const std::string filename, int64_t insterestedStock = 
 
             lastRequestSeq = seqnum;
             bool ok        = book.matchAddNewOrder(
-                    msg.OrderReferenceNumber.value, msg.Side == 'B' ? Side::Buy : Side::Sell, msg.Shares.value, msg.Price.value);
+                    msg.OrderReferenceNumber.value, msg.Side == 'B' ? Side::Buy : Side::Sell, msg.Shares.value, NasdaqPriceToCentPrice(msg.Price));
             ASSERT_TRUE(ok);
             auto dur = statsAddOrder.prof->stopRecord();
             if (seqnum == insteretest_seqnum) { //16632450) {
@@ -270,7 +296,8 @@ void run_with_order_book(const std::string filename, int64_t insterestedStock = 
             reporter.requestSeq = seqnum;
 
             lastRequestSeq = seqnum;
-            bool ok        = book.replaceOrder(msg.OrderReferenceNumber.value, msg.NewOrderReferenceNumber.value, msg.Shares.value, msg.Price.value);
+            bool ok        = book.replaceOrder(
+                    msg.OrderReferenceNumber.value, msg.NewOrderReferenceNumber.value, msg.Shares.value, NasdaqPriceToCentPrice(msg.Price));
             ASSERT_TRUE(ok);
             statsReplace.prof->stopRecord();
         } else if constexpr (std::is_same_v<T, NasdaqITCH::OrderExecutedWithoutPrice> || std::is_same_v<T, NasdaqITCH::OrderExecuted>) {
@@ -396,31 +423,32 @@ int main_func(int argc, const char *argv[]) {
         std::cerr
                 << "Usage:\n"
                 << argv[0]
-                << R"( -f <Path_to_Nasdaq_ITCH_File> [--orderbook| --print | --chop <destChopFile> | --bench-map <Iterations>] [--stockid stockID] [--msgs <maxtMsgs>]"
+                << R"( -f <Path_to_Nasdaq_ITCH_File> [--print | --chop <destChopFile> | --orderbook <PriceContainer> | --bench-map <Iterations>] [--stockid <stockID>] [--msgs <maxtMsgs>]"
     <Path_to_Nasdaq_ITCH_File> E.g. https://emi.nasdaq.com/ITCH/Nasdaq%20ITCH/01302020.NASDAQ_ITCH50.gz
 
-Actions (default print):
-    --print                   Default. Print all order requests and trades from the file.
-    --chop <destChopFile>     Chop binary file and write to destChopFile. <stock> and <maxSeqNum> applies.
-    --orderbook               Supply requests to orderbook and generate trades. 
-    --bench-map <Iterations>  Benchmark hash map performance. Print latencies for each <Iterations>.
-    --help|-h                 Show this help message.
+Specify one of actions (default print):
+    --print                       Default. Print all order requests and trades from the file.
+    --chop <destChopFile>         Chop binary file and write to destChopFile. <stock> and <maxSeqNum> applies.
+    --orderbook <PriceContainer>  tree, que for price containers. Supply requests/executions to orderbook. 
+    --bench-map <Iterations>      Benchmark hash map performance. Print latencies for each <Iterations>.
+    --help|-h                     Show this help message.
 
 Params:
-    <stock>                   Interested stockID. Default -1 for all.
-    <countMsgs>               The max number of messages for above actions. Default -1 for all.
+    <stockID>                     Interested stockID. Default -1 for all.
+    <maxtMsgs>                    The max number of messages for above actions. Default -1 for all.
  )" << std::endl;
         exit(!errstr.empty());
     };
 
     ActionMode  actionMode        = ActionMode::Print;
     int64_t     interestedStockID = -1, maxMsgs = -1, iterations = 1000000;
-    std::string dataFile, chopFile;
+    std::string dataFile, chopFile, orderBookPricContainer;
     for (int i = 1; i < argc; ++i) {
         if (argv[i] == std::string("-f")) {
             dataFile = argv[++i];
         } else if (argv[i] == std::string("--orderbook")) {
-            actionMode = ActionMode::OrderBook;
+            orderBookPricContainer = argv[++i];
+            actionMode             = ActionMode::OrderBook;
         } else if (argv[i] == std::string("--print")) {
             actionMode = ActionMode::Print;
         } else if (argv[i] == std::string("--bench-map")) {
@@ -443,10 +471,18 @@ Params:
     if (actionMode == ActionMode::Chop) {
         run_chop(dataFile, chopFile, interestedStockID, maxMsgs);
     } else if (actionMode == ActionMode::OrderBook) {
-        run_with_order_book(dataFile, interestedStockID, maxMsgs);
+        if (orderBookPricContainer == "tree") {
+            run_with_order_book<PriceQueType::Tree>(dataFile, interestedStockID, maxMsgs);
+        } else if (orderBookPricContainer == "que") {
+            run_with_order_book<PriceQueType::PriorityQ>(dataFile, interestedStockID, maxMsgs);
+        } else {
+            usage("Invalid orderbook price container type: " + orderBookPricContainer);
+        }
     } else if (actionMode == ActionMode::BenchMap) {
         benchmark_gateway_hashmap<TestStdHashMap>(dataFile, interestedStockID, maxMsgs, iterations);
+#ifdef TEST_BENCH_HASH_MAP
         benchmark_gateway_hashmap<TestAbseilHashMap>(dataFile, interestedStockID, maxMsgs, iterations);
+#endif
     } else {
         run_print(dataFile, interestedStockID, maxMsgs);
     }
@@ -460,7 +496,7 @@ int main(int argc, const char *argv[]) { return main_func(argc, argv); }
 int main() {
     // 5336: MU , 13: APPL
     char const *args[] = {"t", "-f", "../nasdaq-data/data/01302020.NASDAQ_ITCH50", "--bench-map", "10000000"};
-    // char const *args[] = {"t", "-f", "../nasdaq-data/data/01302020.NASDAQ_ITCH50", "--orderbook", "--stockid", "13"};
+    // char const *args[] = {"t", "-f", "../nasdaq-data/data/01302020.NASDAQ_ITCH50", "--orderbook", "tree", "--stockid", "13"};
     main_func(sizeof(args) / sizeof(char *), args);
 }
 #endif // TEST_CONFIG_IMPLEMENT_MAIN

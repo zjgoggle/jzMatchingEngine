@@ -10,6 +10,8 @@
 #include <assert.h>
 #include <stdint.h>
 
+#include "PriceQue.h"
+
 #define ASSERT_OP(a, OP, b)                                                                                                                         \
     std::invoke(                                                                                                                                    \
             [](auto twoValues) {                                                                                                                    \
@@ -84,6 +86,11 @@ inline int64_t getSystemNanos() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
 };
 
+enum class PriceQueType {
+    PriorityQ,
+    Tree,
+};
+
 namespace internal {
 /// @brief OrderInfo contains order info needed by order book.
 struct OrderInfo {
@@ -97,6 +104,7 @@ using OrderList = std::list<OrderInfo>;
 // using OrderList = PooledIntrusiveList<OrderInfo>;
 struct LevelOrders {
     OrderList orderList;
+    CentPrice price;
 };
 
 using OrderListByPriceMap = std::unordered_map<CentPrice, LevelOrders>;
@@ -117,20 +125,36 @@ struct PriceLevel {
 };
 
 /// @brief SideBook maintains all orders by pricess for a side of an instrument.
+template<PriceQueType PriceQueT>
 class SideBook {
-    OrderKeyByOrderIDMap             &_orderKeyByOrderIDMap; // shared OrderIDMap by buy&sell books of an instrument.
-    Side                              _side;
-    OrderListByPriceMap               _levelsByPriceMap;
-    std::vector<internal::PriceLevel> _priceQue; // Buy(0): max heap; Sell(1): min heap.
-    int                               _nOrders{0}, _nPriceLevels{0};
+    OrderKeyByOrderIDMap &_orderKeyByOrderIDMap; // shared OrderIDMap by buy&sell books of an instrument.
+    Side                  _side;
+    OrderListByPriceMap   _levelsByPriceMap;
 
-    bool (*compare_price)(const internal::PriceLevel &x, const internal::PriceLevel &y) = nullptr; // used by _priceQue
-    bool (*can_match)(internal::PriceLevel thisPrice, CentPrice otherPrice)             = nullptr;
+    using compare_price_fun = bool (*)(const internal::PriceLevel &x, const internal::PriceLevel &y);
+    struct CompPrice {
+        compare_price_fun fun;
 
-    static bool compare_price_buy(const internal::PriceLevel &x, const internal::PriceLevel &y) {
+        bool operator()(const internal::PriceLevel &x, const internal::PriceLevel &y) const {
+            return (*fun)(x, y); // x < y;
+        }
+    };
+
+    using PriceTree = PriceLevelTree<internal::PriceLevel, CompPrice>;
+    using PriceQue  = PriceLevelQue<internal::PriceLevel, CompPrice>;
+
+    using PriceTreeOrQue = std::conditional_t<PriceQueT == PriceQueType::Tree, PriceTree, PriceQue>;
+    PriceTreeOrQue _priceQue; // Buy(0): max heap; Sell(1): min heap.
+    // std::vector<internal::PriceLevel> _priceQue; // Buy(0): max heap; Sell(1): min heap.
+    int _nOrders{0}, _nPriceLevels{0};
+
+    // bool (*compare_price)(const internal::PriceLevel &x, const internal::PriceLevel &y) = nullptr; // used by _priceQue
+    bool (*can_match)(internal::PriceLevel thisPrice, CentPrice otherPrice) = nullptr;
+
+    static bool compare_price_less(const internal::PriceLevel &x, const internal::PriceLevel &y) {
         return x.price < y.price; // Buy: max heap
     }
-    static bool compare_price_sell(const internal::PriceLevel &x, const internal::PriceLevel &y) {
+    static bool compare_price_greater(const internal::PriceLevel &x, const internal::PriceLevel &y) {
         return x.price > y.price; // Sell: min heap
     }
     static bool can_match_buy(internal::PriceLevel thisPrice, CentPrice otherPrice) {
@@ -138,28 +162,27 @@ class SideBook {
     }
     static bool can_match_sell(internal::PriceLevel thisPrice, CentPrice otherPrice) { return thisPrice.price <= otherPrice; }
 
-
 public:
+    static constexpr bool has_price_que_iter = PriceTreeOrQue::has_iterator;
+
     SideBook(std::unordered_map<OrderID, OrderKey> &orderKeyByOrderIDMap, Side side, size_t reserveOrders, size_t reservePriceLevelsPerSide)
-        : _orderKeyByOrderIDMap(orderKeyByOrderIDMap), _side(side) {
+        : _orderKeyByOrderIDMap(orderKeyByOrderIDMap),
+          _side(side),
+          _priceQue(reservePriceLevelsPerSide, CompPrice{side == Side::Buy ? &compare_price_less : &compare_price_greater}) {
         if (side == Side::Buy) {
-            compare_price = &compare_price_buy;
-            can_match     = &can_match_buy;
+            can_match = &can_match_buy;
         } else {
-            compare_price = &compare_price_sell;
-            can_match     = &can_match_sell;
+            can_match = &can_match_sell;
         }
         _levelsByPriceMap.reserve(reservePriceLevelsPerSide);
-        _priceQue.reserve(reservePriceLevelsPerSide);
     }
-
     /// Add order to book.
     void addNewOrder(OrderID orderID, Qty qty, CentPrice price) {
         //- use the hashmap to find the price level.
         auto [iterMap, bInserted] = _levelsByPriceMap.try_emplace(price);
         if (bInserted) {
-            _priceQue.push_back(PriceLevel{price, iterMap});
-            pushPriceLevel();
+            iterMap->second.price = price;
+            _priceQue.push(PriceLevel{price, iterMap});
         }
         //- add order to orderlist
         OrderList &orderList = iterMap->second.orderList;
@@ -172,13 +195,13 @@ public:
 
     /// @return remaining qty after match
     Qty tryMatchOtherSide(OrderID orderID, Qty qty, CentPrice price, BookEventReporter auto &&tradeReporter) {
-        while (qty && !_priceQue.empty() && (*can_match)(_priceQue.front(), price)) {
-            if (_priceQue.front().iterMap->second.orderList.empty()) {
+        while (qty && !_priceQue.empty() && (*can_match)(_priceQue.top(), price)) {
+            if (_priceQue.top().iterMap->second.orderList.empty()) {
                 removeTopEmptyPriceLevel();
             } else {
-                internal::PriceLevel  &thisLevel   = _priceQue.front();
-                internal::LevelOrders &levelOrders = thisLevel.iterMap->second;
-                internal::OrderInfo   &orderInfo   = levelOrders.orderList.front();
+                const internal::PriceLevel &thisLevel   = _priceQue.top();
+                internal::LevelOrders      &levelOrders = thisLevel.iterMap->second;
+                internal::OrderInfo        &orderInfo   = levelOrders.orderList.front();
 
                 Qty matchQty = std::min(qty, orderInfo.qty);
                 qty -= matchQty;
@@ -217,18 +240,26 @@ public:
 
     void cancelOrder(OrderKeyByOrderIDMap::iterator iterKey) {
         LevelOrders &levelOrders = iterKey->second.iterMap->second;
+        CentPrice    price       = levelOrders.price;
         levelOrders.orderList.erase(iterKey->second.iterList);
         _orderKeyByOrderIDMap.erase(iterKey);
         --_nOrders;
         if (levelOrders.orderList.empty()) {
             --_nPriceLevels;
-            while (!_priceQue.empty() && _priceQue.front().iterMap->second.orderList.empty()) { removeTopEmptyPriceLevel(); }
-            // if it's not the top level, leave the empty level in book.
+            if constexpr (PriceTreeOrQue::has_erase) {
+                _priceQue.erase(PriceLevel{price, {}});
+            } else {
+                while (!_priceQue.empty() && _priceQue.front().iterMap->second.orderList.empty()) { removeTopEmptyPriceLevel(); }
+                // if it's not the top level, leave the empty level in book.
+            }
         }
     }
 
     int countOrders() const { return _nOrders; }
-    int countPriceLevels() const { return _nPriceLevels; }
+    int countPriceLevels() const {
+        if constexpr (PriceTreeOrQue::has_erase) { assert(_nPriceLevels == _priceQue.size()); }
+        return _nPriceLevels;
+    }
     /// PriceQueueSize >= PriceLevels. There may be empty price levels in queue.
     int getPriceQueueSize() const { return _priceQue.size(); }
     int countOrdersAtPrice(CentPrice price) const {
@@ -238,19 +269,21 @@ public:
 
     std::pair<CentPrice, int> getTopPriceAndOrders() const {
         if (_priceQue.empty()) return {};
-        return {_priceQue.front().price, (int)_priceQue.front().iterMap->second.orderList.size()};
+        return {_priceQue.top().price, (int)_priceQue.top().iterMap->second.orderList.size()};
+    }
+
+    /// \return <itBegin, itEnd> where itBegin points to the top price.
+    auto getPriceLevelIters() const
+        requires has_price_que_iter
+    {
+        return std::make_pair(_priceQue.begin(), _priceQue.end());
     }
 
 private:
-#define USE_HEAP_NAME std // JzBinHeap // or std
-    void pushPriceLevel() {
-        USE_HEAP_NAME::push_heap(_priceQue.begin(), _priceQue.end(), *compare_price); //
-    }
     void removeTopEmptyPriceLevel() {
         assert(!_priceQue.empty());
-        _levelsByPriceMap.erase(_priceQue.front().iterMap);
-        USE_HEAP_NAME::pop_heap(_priceQue.begin(), _priceQue.end(), *compare_price);
-        _priceQue.pop_back();
+        _levelsByPriceMap.erase(_priceQue.begin()->iterMap);
+        _priceQue.pop();
     }
 
     void removeOrderFromBookTop(internal::LevelOrders &levelOrders, internal::OrderInfo &orderInfo) {
@@ -267,16 +300,19 @@ private:
 
 
 /// @brief OrderBook manages all orders for an instrument.
-template<BookEventReporter BookEventReporterT>
+template<BookEventReporter BookEventReporterT, PriceQueType PriceQueT = PriceQueType::Tree>
 class OrderBook {
-    BookEventReporterT               &_eventReporter;
-    internal::OrderKeyByOrderIDMap    _orderKeyByOrderIDMap; // elements are added/deleted in internal::SideBook.
-    std::array<internal::SideBook, 2> _books;                // buy & sell books
+    BookEventReporterT                          &_eventReporter;
+    internal::OrderKeyByOrderIDMap               _orderKeyByOrderIDMap; // elements are added/deleted in internal::SideBook.
+    std::array<internal::SideBook<PriceQueT>, 2> _books;                // buy & sell books
 public:
+    using MySideBook                         = internal::SideBook<PriceQueT>;
+    static constexpr bool has_price_que_iter = MySideBook::has_price_que_iter;
+
     explicit OrderBook(BookEventReporterT &reporter, size_t reserveOrders = 50000, size_t reservePriceLevelsPerSide = 8192)
         : _eventReporter(reporter),
-          _books{internal::SideBook{_orderKeyByOrderIDMap, Side::Buy, reserveOrders, reservePriceLevelsPerSide},
-                 internal::SideBook{_orderKeyByOrderIDMap, Side::Sell, reserveOrders, reservePriceLevelsPerSide}} {
+          _books{MySideBook{_orderKeyByOrderIDMap, Side::Buy, reserveOrders, reservePriceLevelsPerSide},
+                 MySideBook{_orderKeyByOrderIDMap, Side::Sell, reserveOrders, reservePriceLevelsPerSide}} {
         _orderKeyByOrderIDMap.reserve(reserveOrders * 2);
     }
 
@@ -352,6 +388,32 @@ public:
     int                       getPriceQueueSize(Side side) const { return _books[int(side)].getPriceQueueSize(); }
     int                       countOrdersAtPrice(Side side, CentPrice price) const { return _books[int(side)].countOrdersAtPrice(price); }
     std::pair<CentPrice, int> getTopPriceAndOrders(Side side) const { return _books[int(side)].getTopPriceAndOrders(); }
+
+    std::ostream &printPriceLevels(std::ostream &os) const
+        requires has_price_que_iter
+    {
+        auto [itBuy, itBuyEnd]   = _books[0].getPriceLevelIters();
+        auto [itSell, itSellEnd] = _books[1].getPriceLevelIters();
+
+        os << "    iLevel   nOrders  BuyPrice SellPrice   nOrders" << std::endl;
+        for (int iLevel = 0; itBuy != itBuyEnd || itSell != itSellEnd; ++iLevel) {
+            os << std::setw(10) << iLevel;
+            if (itBuy != itBuyEnd) {
+                os << std::setw(10) << itBuy->iterMap->second.orderList.size() << std::setw(10) << itBuy->price;
+                itBuy++;
+            } else {
+                os << std::string(20, '-');
+            }
+            if (itSell != itSellEnd) {
+                os << std::setw(10) << itSell->price << std::setw(10) << itSell->iterMap->second.orderList.size();
+                itSell++;
+            } else {
+                os << std::string(20, '-');
+            }
+            os << std::endl;
+        }
+        return os;
+    }
 };
 
 inline std::string msgTypeToStr(MsgType msgType) {

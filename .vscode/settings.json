@@ -1,5 +1,6 @@
 {
     "cmake.buildDirectory": "${workspaceRoot}/build-${buildType}",
+    // "cmake.generator": "MinGW Makefiles", // not working with vscode. use command: cmake -G "MinGW Makefiles"
     "editor.formatOnSave": true,
     "files.associations": {
         "array": "cpp",
