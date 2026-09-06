@@ -9,41 +9,15 @@
 #include <absl/container/flat_hash_map.h>
 #endif
 
-
-/**
- * Gets the current system time in UTC/Realtime with nanosecond precision.
- * Returns 0 on success, non-zero on failure.
- */
-int get_system_time(struct timespec *ts) {
-    if (!ts) return -1;
-
-#if defined(_MSC_VER)
-// MSVC (Windows CL) natively supports timespec_get
-#define USE_TIMESPEC_GET
-#elif defined(__linux__) || defined(__MINGW32__) || defined(__MINGW64__)
-// Linux and MinGW environments support the POSIX clock_gettime
-#define USE_CLOCK_GETTIME
-#else
-// Fallback attempt for standard C11 compliance if platform is ambiguous
-#if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
-#define USE_TIMESPEC_GET
-#else
-#error "No compatible high-resolution timer found for this platform."
-#endif
-#endif
-
-#if defined(USE_TIMESPEC_GET)
-    // Returns TIME_UTC (which is non-zero) on success, 0 on failure
-    return (timespec_get(ts, TIME_UTC) != 0) ? 0 : -1;
-
-#elif defined(USE_CLOCK_GETTIME)
-    // Returns 0 on success, -1 on failure
-    return clock_gettime(CLOCK_REALTIME, ts);
-#endif
-}
-
 template<size_t subsecondDigits = 6, bool bUTCTime = false>
 const char *print_time(char *buffer = nullptr, timespec ts = {-1, -1}, const char *timeFmt = "%Y%m%d-%T") {
+    constexpr auto get_system_time = [](struct timespec *ts) -> int {
+#if defined(_MSC_VER)
+        return (timespec_get(ts, TIME_UTC) != 0) ? 0 : -1;
+#else
+        return clock_gettime(CLOCK_REALTIME, ts); // POSIX-compliant systems, mingw, linux
+#endif
+    };
     static const unsigned BUFFERSIZE = 32;
     static char           localbuf[BUFFERSIZE];
     static const char    *subsecFmt[3]    = {".%03ld", ".%06ld", ".%09ld"};
