@@ -7,6 +7,7 @@
 #include <iostream>
 #include <string>
 #include <chrono>
+#include <iomanip> // Required for std::setw
 #include <assert.h>
 #include <stdint.h>
 

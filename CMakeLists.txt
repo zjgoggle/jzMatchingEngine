@@ -1,7 +1,7 @@
 cmake_minimum_required( VERSION 3.13 )
 project(JzMatchingEngine)
 
-message("Building JzMatchingEngine ${ARCHITECTURE}-${CMAKE_BUILD_TYPE}")
+message("---- Building JzMatchingEngine ${CMAKE_SYSTEM_NAME}_${CMAKE_CXX_COMPILER_ID}_${ARCHITECTURE}_${CMAKE_BUILD_TYPE}")
 
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)

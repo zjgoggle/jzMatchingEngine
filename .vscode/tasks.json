@@ -8,6 +8,7 @@
                 "-fdiagnostics-color=always",
                 "-DTEST_CONFIG_IMPLEMENT_MAIN",
                 "-std=c++20",
+                "-fdiagnostics-all-candidates",
                 "-g",
                 "${file}",
                 "-I${workspaceFolder}/src",
